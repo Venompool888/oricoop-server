@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Linux/Docker build (.NET 8) of the same C# 5 sources that build-cserver.ps1 compiles on Windows. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>CServer</AssemblyName>
+    <StartupObject>OriCoop.CServer.CServer</StartupObject>
+    <LangVersion>5</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="CServer.cs" />
+    <Compile Include="../shared/CsWire.cs" />
+    <Compile Include="../shared/Arbiter.cs" />
+    <Compile Include="../shared/net/NetPeer.cs" />
+    <Compile Include="../shared/net/Transport.cs" />
+    <Compile Include="../tests/CServerTest.cs" />
+  </ItemGroup>
+</Project>

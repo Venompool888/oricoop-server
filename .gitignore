@@ -1,0 +1,13 @@
+bin/
+obj/
+out/
+publish/
+logs/
+*.exe
+*.pdb
+*.log
+.env
+*.env
+!deploy/oricoop-cserver.env.example
+.vs/
+.vscode/

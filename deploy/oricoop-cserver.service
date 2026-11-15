@@ -1,0 +1,31 @@
+[Unit]
+Description=OriCoop authority and arbitration UDP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oricoop-cserver
+Group=oricoop-cserver
+WorkingDirectory=/opt/oricoop-cserver/app
+ExecStart=/usr/bin/dotnet /opt/oricoop-cserver/app/CServer.dll
+EnvironmentFile=-/etc/oricoop-cserver.env
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+LogsDirectory=oricoop-cserver
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
