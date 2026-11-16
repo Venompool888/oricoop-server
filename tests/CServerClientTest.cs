@@ -221,20 +221,20 @@ namespace OriCoop.CServer
             Check("rejoin_seq_restart_not_deduped", Until(delegate { return b.Events.Count == before + 1; }, 700));
 
             Client wrong = Join(1, "000000", null);
-            Check("wrong_code_chinese_failure", wrong.Failures.Count == 1 && wrong.Failures[0] == "无此房间" &&
+            Check("wrong_code_chinese_failure", wrong.Failures.Count == 1 && wrong.Failures[0] == "server.err.noroom" &&
                 wrong.Session.Seat == 0 && wrong.Assigned.Count == 0 && !wrong.Session.IsArbiter);
             wrong.Leave();
             Client fourth = Join(1, code, null);
             Check("fourth_seat", fourth.Session.Seat == 4);
             Client fifth = Join(1, code, null);
-            Check("fifth_room_full", fifth.Failures.Count == 1 && fifth.Failures[0] == "房间已满" && fifth.Session.Seat == 0);
+            Check("fifth_room_full", fifth.Failures.Count == 1 && fifth.Failures[0] == "server.err.full" && fifth.Session.Seat == 0);
             fifth.Leave();
 
             Client invalid = Join(2, code, new byte[16]);
-            Check("invalid_reconnect_token", invalid.Failures.Count == 1 && invalid.Failures[0] == "重连凭证无效");
+            Check("invalid_reconnect_token", invalid.Failures.Count == 1 && invalid.Failures[0] == "server.err.token");
             invalid.Leave();
             Client version = Join(3, code, null);
-            Check("version_failure", version.Failures.Count == 1 && version.Failures[0] == "版本不符");
+            Check("version_failure", version.Failures.Count == 1 && version.Failures[0] == "server.err.version");
             version.Leave();
             rejoin.Session.Receive(CsWire.Encode(new CsMessage { Type = CsWire.CsError, ErrorCode = 1, Text = "测试错误" }));
             Check("cs_error_join_failed", rejoin.Failures.Count == 1 && rejoin.Failures[0] == "测试错误");

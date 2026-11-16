@@ -63,7 +63,8 @@ namespace OriCoop.Authority
                     }
                     else if (JoinFailed != null)
                     {
-                        string[] reasons = { "", "无此房间", "房间已满", "版本不符", "重连凭证无效" };
+                        // L10n keys (the Unity glue shows L10n.T(key)); this file stays free of Unity code.
+                        string[] reasons = { "", "server.err.noroom", "server.err.full", "server.err.version", "server.err.token" };
                         JoinFailed(reasons[message.Result]);
                     }
                     break;
