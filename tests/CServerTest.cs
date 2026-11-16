@@ -366,11 +366,44 @@ namespace OriCoop.CServer
             Check("wire_all_11_messages_roundtrip", all);
         }
 
+        static CsMessage GapAction(uint seq, byte flags, string key)
+        {
+            return new CsMessage { Type = CsWire.CsAction, Seq = seq, Kind = 3, Flags = flags, Key = key, Data = new byte[0] };
+        }
+
+        static int GapEvents(List<Outgoing> output, byte kind)
+        {
+            int n = 0;
+            foreach (Outgoing o in output) { CsMessage m = CsWire.Decode(o.Message); if (m.Type == CsWire.CsEvent && m.Kind == kind) n++; }
+            return n;
+        }
+
+        // C0 gaps: bounded per-seat dedup and claim release / respawn generation.
+        static void GapTests()
+        {
+            Arbiter arb = new Arbiter("GAPTST", new ArbiterOptions(), 0);
+            int s1, s2; byte[] w;
+            arb.Join(new CsMessage { Type = CsWire.CsJoin, Proto = 1, Mode = 0, Token = new byte[16], Nick = "a" }, 0, out s1, out w);
+            arb.Join(new CsMessage { Type = CsWire.CsJoin, Proto = 1, Mode = 1, Token = new byte[16], Nick = "b" }, 0, out s2, out w);
+            for (uint i = 1; i <= 20000; i++) arb.Handle(s1, GapAction(i, 0, "x"), 1);
+            Check("gap_dedup_bounded", arb.SeenCount(s1) <= 2 * Arbiter.SeqWindow);
+            Check("gap_dedup_old_seq_dropped", GapEvents(arb.Handle(s1, GapAction(5, 0, "x"), 2), 3) == 0);
+            Check("gap_dedup_recent_dup_dropped", GapEvents(arb.Handle(s1, GapAction(19999, 0, "x"), 2), 3) == 0);
+            Check("gap_dedup_new_seq_ok", GapEvents(arb.Handle(s1, GapAction(20001, 0, "x"), 2), 3) == 1);
+
+            Check("gap_claim_first", GapEvents(arb.Handle(s1, GapAction(30000, Arbiter.FlagClaim, "p:g"), 3), 3) == 1);
+            Check("gap_claim_second_rejected", GapEvents(arb.Handle(s2, GapAction(1, Arbiter.FlagClaim, "p:g"), 3), 0xFF) == 1);
+            Check("gap_release_by_other_ignored", GapEvents(arb.Handle(s2, GapAction(2, Arbiter.FlagRelease, "p:g"), 3), 3) == 0);
+            Check("gap_release_by_winner", GapEvents(arb.Handle(s1, GapAction(30001, Arbiter.FlagRelease, "p:g"), 3), 3) == 1);
+            Check("gap_claim_after_release", GapEvents(arb.Handle(s2, GapAction(3, Arbiter.FlagClaim, "p:g"), 3), 3) == 1);
+            Check("gap_generation_key_independent", GapEvents(arb.Handle(s1, GapAction(30002, Arbiter.FlagClaim, "p:g#2"), 3), 3) == 1);
+        }
+
         public static int Main()
         {
             try
             {
-                WireTests(); LogicTests();
+                WireTests(); LogicTests(); GapTests();
                 server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
                     MinHoldMs = 500, RoomIdleMs = 1500 });
                 server.Start(0);

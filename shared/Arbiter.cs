@@ -30,7 +30,26 @@ namespace OriCoop.Authority
             public double OfflineAt;
             public uint LastEvent;
             public readonly HashSet<uint> Seen = new HashSet<uint>();
+            public uint MaxSeq;
+
+            // Bounded dedup: remembers the last SeqWindow sequence numbers; anything older counts as already seen.
+            public bool FirstTime(uint seq)
+            {
+                if (MaxSeq >= SeqWindow && seq <= MaxSeq - SeqWindow) return false;
+                if (!Seen.Add(seq)) return false;
+                if (seq > MaxSeq) MaxSeq = seq;
+                if (Seen.Count > 2 * SeqWindow)
+                {
+                    uint floor = MaxSeq >= SeqWindow ? MaxSeq - SeqWindow : 0;
+                    Seen.RemoveWhere(delegate(uint s) { return s <= floor; });
+                }
+                return true;
+            }
         }
+
+        static readonly RandomNumberGenerator Random = new RNGCryptoServiceProvider();
+        public const uint SeqWindow = 4096;
+        public const byte FlagClaim = 1, FlagRelease = 2;
 
         sealed class LeaseInfo
         {
@@ -43,7 +62,9 @@ namespace OriCoop.Authority
         readonly SeatInfo[] seats = new SeatInfo[5];
         readonly Dictionary<string, LeaseInfo> leases = new Dictionary<string, LeaseInfo>();
         readonly Dictionary<string, CsStateEntry> states = new Dictionary<string, CsStateEntry>();
-        readonly HashSet<string> claimed = new HashSet<string>();
+        // Claim key -> seat that won it. Keys that can happen again (respawning pickups, re-openable doors)
+        // either append a generation ("p:<guid>#<gen>") or are released with FlagRelease.
+        readonly Dictionary<string, int> claimed = new Dictionary<string, int>();
         readonly List<CsMessage> events = new List<CsMessage>();
         readonly ArbiterOptions options;
         readonly string code;
@@ -59,6 +80,7 @@ namespace OriCoop.Authority
         }
 
         public long DroppedStates { get { return droppedStates; } }
+        public int SeenCount(int seat) { return seats[seat] == null ? 0 : seats[seat].Seen.Count; }
 
         public bool IsOnline(int seat, double nowMs)
         {
@@ -135,7 +157,7 @@ namespace OriCoop.Authority
                 else
                 {
                     byte[] token = new byte[16];
-                    using (RNGCryptoServiceProvider random = new RNGCryptoServiceProvider()) random.GetBytes(token);
+                    lock (Random) Random.GetBytes(token);   // .NET 3.5: RNGCryptoServiceProvider is not IDisposable
                     seats[seat] = new SeatInfo { Token = token, Steam = request.Steam, Nick = request.Nick };
                 }
             }
@@ -235,13 +257,22 @@ namespace OriCoop.Authority
             }
             else if (request.Type == CsWire.CsAction)
             {
-                if (!seats[seat].Seen.Add(request.Seq)) return output;
-                if ((request.Flags & 1) != 0 && !claimed.Add(request.Key))
+                if (!seats[seat].FirstTime(request.Seq)) return output;
+                if ((request.Flags & FlagRelease) != 0)
+                {
+                    // Release: only the winner (or anyone once the winner's seat is gone) frees the key; broadcast as an event.
+                    int winner;
+                    if (!claimed.TryGetValue(request.Key, out winner)) return output;
+                    if (winner != seat && seats[winner] != null) return output;
+                    claimed.Remove(request.Key);
+                }
+                else if ((request.Flags & FlagClaim) != 0 && claimed.ContainsKey(request.Key))
                 {
                     Add(output, seat, new CsMessage { Type = CsWire.CsEvent, From = (byte)seat,
                         Seq = request.Seq, Kind = 0xFF, Key = request.Key, Data = new byte[] { request.Kind } }, nowMs);
                     return output;
                 }
+                else if ((request.Flags & FlagClaim) != 0) claimed[request.Key] = seat;
                 CsMessage e = new CsMessage { Type = CsWire.CsEvent, Id = ++lastEvent, From = (byte)seat,
                     Seq = request.Seq, Kind = request.Kind, Key = request.Key, Data = (byte[])request.Data.Clone() };
                 events.Add(e);

@@ -69,7 +69,7 @@ timeout 5 dotnet /opt/oricoop-cserver/app-new/CServer.dll --port 47022; echo "ex
 Expected: `OriCoop C-server listening on UDP port 47022`, then `exit 124` (stopped by timeout = it ran).
 `C-server failed: ...` = read the message (usually the port is taken).
 
-The full test suite (26 tests, real UDP on localhost) runs on Windows with `build-cserver.ps1`. On Linux the tests are
+The full test suite (36 tests, real UDP on localhost) runs on Windows with `build-cserver.ps1`. On Linux the tests are
 compiled into the binary but not run by publish; if the human wants test results, run `build-cserver.ps1` on a
 Windows machine.
 
@@ -156,7 +156,7 @@ default `CMD` sets `--port 47022`, which overrides `ORICOOP_CSERVER_PORT`).
 
 Windows:
 ```powershell
-.\build-cserver.ps1                              # build + 26 tests
+.\build-cserver.ps1                              # build + 36 tests
 .\server\CServer.exe --port 47022 --log .\logs   # Ctrl+C stops it
 New-NetFirewallRule -DisplayName 'OriCoop C-server' -Direction Inbound -Protocol UDP -LocalPort 47022 -Action Allow   # admin, confirm first
 ```

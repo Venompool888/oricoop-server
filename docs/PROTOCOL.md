@@ -17,7 +17,7 @@ C-server 控制消息占 176–186（0xB0–0xBA）。字符串 = `u8 长度 + U
 | 178 | CsRoster | server → all | `n u8`, then per seat `seat u8, online u8, steam u64, nick str` |
 | 179 | CsLease | client → server | `op u8` (1 request, 2 release), `key str`, `score f32`, `active u8` |
 | 180 | CsGrant | server → all | `key str`, `owner u8` (0 = nobody), `epoch u32` |
-| 181 | CsAction | client → server | `seq u32`, `kind u8`, `flags u8` (bit0 = Claim), `key str`, `len u16 + data` |
+| 181 | CsAction | client → server | `seq u32`, `kind u8`, `flags u8` (bit0 = Claim, bit1 = Release), `key str`, `len u16 + data` |
 | 182 | CsEvent | server → all | `id u32`, `from u8`, `seq u32`, `kind u8`, `key str`, `len u16 + data`. A rejected Claim goes only to its sender with `kind=0xFF` and `data` = the original kind |
 | 183 | CsState | both | `key str`, `epoch u32`, `ver u32`, `active u8`, `len u16 + blob`. Accepted only from the current owner with a higher version; forwarded to the others |
 | 184 | CsSnapshot | server → new seat | all leases (as 180) + all states (as 183); then the events it has not seen are replayed |
@@ -40,9 +40,14 @@ real sender. / 其他类型（1–65 等）服务器改写座位字节后转发�
    interest the owner becomes 0. / 拥有者离线或释放：交给 score 最小的在线有兴趣者；没人就变成 0。
 5. State: accepted only if `epoch` is current, the sender is the owner and `ver` is higher than stored.
    状态：epoch 是当前、发送者是拥有者、ver 递增才收。
-6. Actions: a repeated `(seat, seq)` is dropped. Claim: the first one for a key wins, later ones get `0xFF`. Accepted
-   actions get a global event id and are broadcast to everyone, the sender included.
-   动作：`(座位, seq)` 去重；Claim 先到先得；通过的动作分配全局事件编号并广播给所有人（含发起者）。
+6. Actions: a repeated `(seat, seq)` is dropped. Dedup is a sliding window of the last 4096 seqs per seat; anything
+   older counts as already seen. Claim: the first one for a key wins, later ones get `0xFF`. Release (flags bit1):
+   only the winner can free a claimed key (anyone, once the winner's seat has expired); the release is broadcast as an
+   event. Things that can happen again can instead use generation keys such as `p:<guid>#<gen>`. Accepted actions get
+   a global event id and are broadcast to everyone, the sender included.
+   动作：`(座位, seq)` 去重（每座位只记最近 4096 个 seq，更老的当重复）；Claim 先到先得；Release（bit1）只有赢家能释放
+   （赢家座位过期后任何人可释放），释放也作为事件广播；会重生的东西可用代数 key `p:<guid>#<代数>`。
+   通过的动作分配全局事件编号并广播给所有人（含发起者）。
 7. Late join / reconnect: snapshot first (leases + states), then the events after `lastEvent` (the server keeps the
    latest 4096). / 晚加入或重连：先发快照，再补发之后的事件（保留最近 4096 条）。
 

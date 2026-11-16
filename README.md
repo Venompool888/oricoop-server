@@ -78,7 +78,7 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
 ```
 server/   CServer.cs (UDP hub), CServer.csproj (net8.0), Dockerfile
 shared/   Arbiter.cs, CsWire.cs (pure C# 5, also meant for the mod), net/ (copies of the mod's NetPeer.cs, Transport.cs)
-tests/    CServerTest.cs (26 tests)
+tests/    CServerTest.cs (36 tests)
 deploy/   oricoop-cserver.service, oricoop-cserver.env.example
 docs/     PROTOCOL.md
 ```
