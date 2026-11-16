@@ -11,6 +11,8 @@ namespace OriCoop.Authority
         readonly bool arbiterIsLocal;
         readonly Dictionary<string, CsLeaseEntry> leases = new Dictionary<string, CsLeaseEntry>();
         readonly Dictionary<string, uint> versions = new Dictionary<string, uint>();
+        readonly Dictionary<string, uint> receivedVersions = new Dictionary<string, uint>();
+        readonly Dictionary<string, StateUpdate> latest = new Dictionary<string, StateUpdate>();
         uint lastEvent, nextSeq = 1;
 
         public AuthorityClient(AuthorityMode mode, Func<int> localSeat,
@@ -41,6 +43,12 @@ namespace OriCoop.Authority
 
         public bool Owns(string key) { return mode == AuthorityMode.None || (LocalSeat != 0 && OwnerOf(key) == LocalSeat); }
 
+        public StateUpdate LatestState(string key)
+        {
+            StateUpdate state;
+            return latest.TryGetValue(key, out state) ? state : null;
+        }
+
         void Send(CsMessage message, bool reliable)
         {
             message.Seat = (byte)LocalSeat;
@@ -66,6 +74,8 @@ namespace OriCoop.Authority
             uint ver;
             versions.TryGetValue(key, out ver);
             versions[key] = ++ver;
+            latest[key] = new StateUpdate { Key = key, From = LocalSeat, Epoch = EpochOf(key),
+                Ver = ver, Active = active, Data = (byte[])data.Clone() };
             Send(new CsMessage { Type = CsWire.CsState, Key = key, Epoch = EpochOf(key), Ver = ver,
                 Active = (byte)(active ? 1 : 0), Data = data }, false);
         }
@@ -85,18 +95,25 @@ namespace OriCoop.Authority
 
         void Grant(CsLeaseEntry lease)
         {
+            CsLeaseEntry previous;
+            if (leases.TryGetValue(lease.Key, out previous) && lease.Epoch <= previous.Epoch) return;
             leases[lease.Key] = lease;
             if (LeaseChanged != null) LeaseChanged(new LeaseChange { Key = lease.Key, Owner = lease.Owner, Epoch = lease.Epoch });
         }
 
-        void State(CsStateEntry state)
+        void State(CsStateEntry state, bool snapshot)
         {
             uint ver;
+            if (snapshot ? state.Epoch > EpochOf(state.Key) : state.Epoch != EpochOf(state.Key)) return;
+            if (receivedVersions.TryGetValue(state.Key, out ver) && state.Ver <= ver) return;
+            receivedVersions[state.Key] = state.Ver;
             versions.TryGetValue(state.Key, out ver);
             if (state.Ver > ver) versions[state.Key] = state.Ver;
             // NetPlay rewrites forwarded headers to the host seat; the lease identifies the publisher.
-            if (StateReceived != null) StateReceived(new StateUpdate { Key = state.Key, From = OwnerOf(state.Key),
-                Epoch = state.Epoch, Ver = state.Ver, Active = state.Active != 0, Data = state.Data });
+            StateUpdate update = new StateUpdate { Key = state.Key, From = OwnerOf(state.Key),
+                Epoch = state.Epoch, Ver = state.Ver, Active = state.Active != 0, Data = state.Data };
+            latest[state.Key] = update;
+            if (StateReceived != null) StateReceived(update);
         }
 
         public void Receive(byte[] csMessage)
@@ -109,7 +126,7 @@ namespace OriCoop.Authority
                     break;
                 case CsWire.CsState:
                     State(new CsStateEntry { Key = message.Key, Epoch = message.Epoch, Ver = message.Ver,
-                        Active = message.Active, Data = message.Data });
+                        Active = message.Active, Data = message.Data }, false);
                     break;
                 case CsWire.CsEvent:
                     bool rejected = message.Kind == 0xFF;
@@ -124,9 +141,11 @@ namespace OriCoop.Authority
                     break;
                 case CsWire.CsSnapshot:
                     leases.Clear();
+                    receivedVersions.Clear();
+                    latest.Clear();
                     if (Reset != null) Reset();
                     foreach (CsLeaseEntry lease in message.Leases) Grant(lease);
-                    foreach (CsStateEntry state in message.States) State(state);
+                    foreach (CsStateEntry state in message.States) State(state, true);
                     break;
                 // Session/roster/error presentation belongs to the transport; IAuthority has no such events.
                 case CsWire.CsRoster:
@@ -138,7 +157,7 @@ namespace OriCoop.Authority
 
         public void ResetSession()
         {
-            leases.Clear(); versions.Clear(); lastEvent = 0; nextSeq = 1;
+            leases.Clear(); versions.Clear(); receivedVersions.Clear(); latest.Clear(); lastEvent = 0; nextSeq = 1;
             if (Reset != null) Reset();
         }
 

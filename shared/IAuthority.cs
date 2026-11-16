@@ -42,6 +42,7 @@ namespace OriCoop.Authority
         int OwnerOf(string key);                     // last granted owner, 0 = nobody / unknown
         uint EpochOf(string key);
         bool Owns(string key);
+        StateUpdate LatestState(string key);
 
         // Ask to simulate `key`. score: lower = more relevant (distance). active: I am interacting with it right now.
         void RequestLease(string key, float score, bool active);
