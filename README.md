@@ -1,15 +1,15 @@
 # OriCoop Server (C-server)
 
-> **Prototype (C0). Not connected to the game yet: you cannot play with it.** No OriCoop client release talks to this
+> **Prototype. Not connected to the game yet: you cannot play with it.** No OriCoop client release talks to this
 > server so far. For playing online today, use the tunnel relay
 > [oricoop-relay](https://github.com/Venompool888/oricoop-relay).
 >
-> **原型阶段（C0）。还没有接入游戏客户端，现在不能用来玩。** 目前没有任何 OriCoop 客户端版本会连接这个服务器。
+> **原型阶段。还没有接入游戏客户端，现在不能用来玩。** 目前没有任何 OriCoop 客户端版本会连接这个服务器。
 > 现在要联机，请用隧道中继 [oricoop-relay](https://github.com/Venompool888/oricoop-relay)。
 
 | | |
 |---|---|
-| Stage / 阶段 | **C0 prototype**: server + arbiter + loopback tests. 原型：服务器、裁判、本机测试 |
+| Stage / 阶段 | **Prototype**: server + arbiter (C0), plus the pure C# client-side authority layer (C1/C2: `IAuthority`, P2P-host arbiter, C-server client). No gameplay code uses it yet. 原型：服务器和裁判（C0），加上客户端的纯 C# 权威层（C1/C2），还没有玩法代码调用它 |
 | Protocol / 协议 | **C-server wire protocol v1** (`CsJoin.proto = 1`), see [docs/PROTOCOL.md](docs/PROTOCOL.md) |
 | Matching client / 对应客户端 | **None yet.** A future OriCoop release will list the version here. 暂无，以后的客户端版本会写在这里 |
 | Players per room / 每房人数 | 1-4 |
@@ -45,7 +45,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 .\server\CServer.exe --port 47022 --log .\logs
 ```
 
-The last line must be `RESULT PASS n/n`. The tests use real UDP sockets and the mod's own `NetPeer` on localhost.
+Three test sets run (`CServerTest`, `AuthorityTest`, `CServerClientTest`); each must end with `RESULT PASS n/n`. They
+use real UDP sockets and the mod's own `NetPeer` on localhost. Check a deployed server over the real network:
+`.\tests\CServerTest.exe --host <server>[:47022]` (12 black-box checks).
 
 ### Deploy
 
@@ -77,8 +79,10 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
 
 ```
 server/   CServer.cs (UDP hub), CServer.csproj (net8.0), Dockerfile
-shared/   Arbiter.cs, CsWire.cs (pure C# 5, also meant for the mod), net/ (copies of the mod's NetPeer.cs, Transport.cs)
-tests/    CServerTest.cs (36 tests)
+shared/   pure C# 5 files also compiled into the mod: Arbiter.cs, CsWire.cs (server side), IAuthority.cs,
+          AuthorityClient.cs, HostArbiter.cs, INetRouteServer.cs, CServerClient.cs (client side);
+          net/ (copies of the mod's NetPeer.cs, Transport.cs)
+tests/    CServerTest.cs (36 + 12 --host checks), AuthorityTest.cs (31), CServerClientTest.cs (17)
 deploy/   oricoop-cserver.service, oricoop-cserver.env.example
 docs/     PROTOCOL.md
 ```

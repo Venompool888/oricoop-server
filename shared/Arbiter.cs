@@ -31,6 +31,7 @@ namespace OriCoop.Authority
             public uint LastEvent;
             public readonly HashSet<uint> Seen = new HashSet<uint>();
             public uint MaxSeq;
+            public void NewSession() { Seen.Clear(); MaxSeq = 0; }
 
             // Bounded dedup: remembers the last SeqWindow sequence numbers; anything older counts as already seen.
             public bool FirstTime(uint seq)
@@ -166,6 +167,7 @@ namespace OriCoop.Authority
             {
                 after = seats[seat].LastEvent;
                 seats[seat].Online = true;
+                seats[seat].NewSession();   // a (re)joining client restarts its seq at 1
             }
             welcome = CsWire.Encode(new CsMessage { Type = CsWire.CsWelcome, Result = result,
                 AssignedSeat = (byte)seat, Code = code, Token = seat == 0 ? new byte[16] : seats[seat].Token,
@@ -175,6 +177,24 @@ namespace OriCoop.Authority
                 Snapshot(output, seat, after, nowMs);
                 Roster(output, nowMs);
             }
+            return output;
+        }
+
+        public List<Outgoing> JoinAt(int seat, ulong steam, string nick, double nowMs)
+        {
+            List<Outgoing> output = new List<Outgoing>();
+            SeatInfo info = seats[seat];
+            if (info == null)
+            {
+                byte[] token = new byte[16];
+                lock (Random) Random.GetBytes(token);
+                info = new SeatInfo { Token = token, Steam = steam, Nick = nick };
+                seats[seat] = info;
+            }
+            info.Online = true;
+            info.NewSession();
+            Snapshot(output, seat, info.LastEvent, nowMs);
+            Roster(output, nowMs);
             return output;
         }
 

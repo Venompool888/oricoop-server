@@ -41,7 +41,8 @@ real sender. / 其他类型（1–65 等）服务器改写座位字节后转发�
 5. State: accepted only if `epoch` is current, the sender is the owner and `ver` is higher than stored.
    状态：epoch 是当前、发送者是拥有者、ver 递增才收。
 6. Actions: a repeated `(seat, seq)` is dropped. Dedup is a sliding window of the last 4096 seqs per seat; anything
-   older counts as already seen. Claim: the first one for a key wins, later ones get `0xFF`. Release (flags bit1):
+   older counts as already seen. A seat's window is cleared when it rejoins (a restarted client starts its seq
+   again). Claim: the first one for a key wins, later ones get `0xFF`. Release (flags bit1):
    only the winner can free a claimed key (anyone, once the winner's seat has expired); the release is broadcast as an
    event. Things that can happen again can instead use generation keys such as `p:<guid>#<gen>`. Accepted actions get
    a global event id and are broadcast to everyone, the sender included.

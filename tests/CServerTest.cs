@@ -24,10 +24,10 @@ namespace OriCoop.CServer
             public readonly List<Received> Inbox = new List<Received>();
             public CsMessage Welcome;
 
-            public Client(int port)
+            public Client(IPEndPoint endpoint)
             {
                 Peer = new NetPeer(Socket);
-                Peer.Connect(new IPEndPoint(IPAddress.Loopback, port));
+                Peer.Connect(endpoint);
             }
 
             public void Send(CsMessage message) { Send(CsWire.Encode(message), true); }
@@ -71,6 +71,9 @@ namespace OriCoop.CServer
         static readonly List<Client> clients = new List<Client>();
         static readonly Stopwatch clock = Stopwatch.StartNew();
         static CServer server;
+        static IPEndPoint remote;          // --host: test a deployed server instead of an in-process one
+        static double deadlineSeconds = 27;
+        static int wait = 700;             // reply timeout; longer over the internet
         static int passed, total;
 
         static void Check(string name, bool ok)
@@ -82,10 +85,10 @@ namespace OriCoop.CServer
 
         static void Pump()
         {
-            if (clock.Elapsed.TotalSeconds >= 27) throw new Exception("test deadline");
-            server.Step();
+            if (clock.Elapsed.TotalSeconds >= deadlineSeconds) throw new Exception("test deadline");
+            if (server != null) server.Step();
             foreach (Client c in clients) c.Poll();
-            server.Step();
+            if (server != null) server.Step();
             Thread.Sleep(1);
         }
 
@@ -104,9 +107,9 @@ namespace OriCoop.CServer
 
         static Client Connect()
         {
-            Client c = new Client(server.LocalPort);
+            Client c = new Client(remote ?? new IPEndPoint(IPAddress.Loopback, server.LocalPort));
             clients.Add(c);
-            if (!Until(delegate { return c.Peer.State == PeerState.Connected; }, 1200))
+            if (!Until(delegate { return c.Peer.State == PeerState.Connected; }, Math.Max(1200, wait * 2)))
                 throw new Exception("handshake timeout");
             return c;
         }
@@ -117,9 +120,9 @@ namespace OriCoop.CServer
             c.Send(new CsMessage { Type = CsWire.CsJoin, Proto = 1, Mode = mode,
                 Code = code, Token = token ?? new byte[16], Steam = (ulong)clients.Count,
                 Nick = "player" + clients.Count });
-            if (!Until(delegate { return c.Welcome != null; }, 1200))
+            if (!Until(delegate { return c.Welcome != null; }, Math.Max(1200, wait * 2)))
                 throw new Exception("welcome timeout");
-            RunFor(25);
+            RunFor(remote != null ? wait / 2 : 25);
             return c;
         }
 
@@ -399,15 +402,118 @@ namespace OriCoop.CServer
             Check("gap_generation_key_independent", GapEvents(arb.Handle(s1, GapAction(30002, Arbiter.FlagClaim, "p:g#2"), 3), 3) == 1);
         }
 
-        public static int Main()
+        // Black-box checks against a deployed server (default options, real network): no server internals,
+        // no timing that depends on the test-only short holds.
+        static void RemoteTests()
         {
+            Client a = Join(0, "", null);
+            string code = a.Welcome.Code;
+            Client b = Join(1, code, null), c = Join(1, code, null);
+            Check("r_join_seats_roster", a.Welcome.Result == 0 && a.Welcome.AssignedSeat == 1 &&
+                b.Welcome.AssignedSeat == 2 && c.Welcome.AssignedSeat == 3 && code.Length == 6 &&
+                Until(delegate { return Online(a, 3, true, 3) && Online(b, 1, true, 3) && Online(c, 2, true, 3); }, wait));
+            Client d = Join(1, code, null), fifth = Join(1, code, null);
+            Check("r_fourth_and_full", d.Welcome.Result == 0 && d.Welcome.AssignedSeat == 4 && fifth.Welcome.Result == 2);
+            Client bad = Join(1, "000000", null);
+            Check("r_no_such_room", bad.Welcome.Result == 1);
+
+            Clear();
+            bool forwarded = false;
+            for (int attempt = 0; attempt < 3 && !forwarded; attempt++)   // unreliable may be lost on the internet
+            {
+                a.Send(new byte[] { 1, 4, 90 }, false);
+                forwarded = Until(delegate { return b.Count(1) >= 1 && c.Count(1) >= 1; }, wait);
+            }
+            RunFor(wait / 2);
+            Check("r_rewrite_seat_unreliable_no_echo", forwarded && a.Count(1) == 0 &&
+                b.Inbox[0].Bytes[1] == 1 && c.Inbox[0].Bytes[1] == 1 && !b.Inbox[0].Reliable);
+            Clear();
+            a.Send(new CsMessage { Type = CsWire.CsTo, Target = 3, Inner = new byte[] { 2, 4, 42 } });
+            bool targeted = Until(delegate { return c.Count(2) == 1; }, wait);
+            RunFor(wait / 2);
+            Check("r_target_only_reliable", targeted && a.Count(2) == 0 && b.Count(2) == 0 &&
+                d.Count(2) == 0 && c.Inbox[0].Bytes[1] == 1 && c.Inbox[0].Reliable);
+
+            Clear();
+            a.Send(Lease("K", 1, 10));
+            bool granted = Until(delegate { return Grant(b, "K", 1, 1) && Grant(c, "K", 1, 1) && Grant(d, "K", 1, 1); }, wait);
+            a.Send(State("K", 1, 1, 1, 11));
+            bool state = Until(delegate { return b.Count(CsWire.CsState) == 1 && c.Count(CsWire.CsState) == 1; }, wait);
+            RunFor(wait / 2);
+            Check("r_lease_grant_state_forward", granted && state && a.Count(CsWire.CsState) == 0 &&
+                c.Last(CsWire.CsState).Data[0] == 11);
+
+            Clear(); a.Send(Action(1, 9, 1, "claim")); b.Send(Action(1, 9, 1, "claim"));
+            bool claims = Until(delegate { return a.Count(CsWire.CsEvent) + b.Count(CsWire.CsEvent) == 3; }, wait);
+            RunFor(wait / 2);
+            int accepted = 0, rejected = 0;
+            foreach (Client who in new Client[] { a, b })
+                foreach (Received r in who.Inbox)
+                    if (r.Message != null && r.Message.Type == CsWire.CsEvent)
+                    {
+                        if (r.Message.Kind == 0xFF && r.Message.Data.Length == 1 && r.Message.Data[0] == 9) rejected++;
+                        else if (r.Message.Kind == 9) accepted++;
+                    }
+            Check("r_claim_first_only", claims && accepted == 2 && rejected == 1 &&
+                c.Count(CsWire.CsEvent) == 1 && d.Count(CsWire.CsEvent) == 1);
+            Clear(); a.Send(Action(2, 10, 0, "normal")); a.Send(Action(2, 10, 0, "normal"));
+            bool oneEvent = Until(delegate { return c.Count(CsWire.CsEvent) == 1; }, wait);
+            RunFor(wait / 2);
+            Check("r_action_dedup", oneEvent && a.Count(CsWire.CsEvent) == 1 && b.Count(CsWire.CsEvent) == 1);
+
+            byte[] bToken = b.Welcome.Token;
+            b.Peer.Disconnect("test");
+            bool offline = Until(delegate { return Online(a, 2, false, 4); }, wait * 2);
+            Client b2 = Join(2, code, bToken);
+            Check("r_token_reconnect", offline && b2.Welcome.Result == 0 && b2.Welcome.AssignedSeat == 2 &&
+                Until(delegate { return Online(a, 2, true, 4); }, wait) && b2.Count(CsWire.CsSnapshot) >= 1);
+
+            Client invalidFirst = Connect();
+            invalidFirst.Send(new byte[] { 1, 4 }, true);
+            bool error = Until(delegate { return invalidFirst.Count(CsWire.CsError) == 1; }, wait);
+            bool closed = Until(delegate { return invalidFirst.Peer.State == PeerState.Disconnected; }, wait);
+            Check("r_first_message_join_required", error && closed);
+            Client proto = Connect();
+            proto.Send(new CsMessage { Type = CsWire.CsJoin, Proto = 2, Mode = 0 });
+            Check("r_protocol_mismatch", Until(delegate { return proto.Welcome != null; }, wait) && proto.Welcome.Result == 3);
+
+            Client isolated = Join(0, "", null); Clear();
+            a.Send(new byte[] { 3, 4, 1 }, true);
+            bool inRoom = Until(delegate { return c.Count(3) == 1; }, wait);
+            RunFor(wait / 2);
+            Check("r_room_isolation", inRoom && isolated.Count(3) == 0 && isolated.Welcome.Code != code);
+            foreach (Client x in clients) x.Peer.Disconnect("done");
+            RunFor(100);
+        }
+
+        public static int Main(string[] args)
+        {
+            for (int i = 0; i + 1 < args.Length; i += 2)
+                if (args[i] == "--host")
+                {
+                    string host = args[i + 1]; int port = 47022;
+                    int colon = host.LastIndexOf(':');
+                    if (colon > 0) { port = int.Parse(host.Substring(colon + 1)); host = host.Substring(0, colon); }
+                    IPAddress ip;
+                    if (!IPAddress.TryParse(host, out ip)) ip = Dns.GetHostAddresses(host)[0];
+                    remote = new IPEndPoint(ip, port);
+                }
             try
             {
-                WireTests(); LogicTests(); GapTests();
-                server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
-                    MinHoldMs = 500, RoomIdleMs = 1500 });
-                server.Start(0);
-                UdpTests();
+                if (remote != null)
+                {
+                    Console.WriteLine("Remote C-server " + remote);
+                    deadlineSeconds = 90; wait = 3000;
+                    RemoteTests();
+                }
+                else
+                {
+                    WireTests(); LogicTests(); GapTests();
+                    server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
+                        MinHoldMs = 500, RoomIdleMs = 1500 });
+                    server.Start(0);
+                    UdpTests();
+                }
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }
             finally

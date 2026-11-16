@@ -2,7 +2,7 @@
 
 You are an AI agent asked to build, test or deploy this server for a human. Follow this file in order.
 
-**First, tell the human the stage:** this is the **C0 prototype**. No OriCoop game client connects to it yet, so a
+**First, tell the human the stage:** this is a **prototype** (server C0 plus client-side groundwork). No OriCoop game client connects to it yet, so a
 deployed C-server cannot be used for playing. If the human wants to play online now, they need the tunnel relay
 [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (see its AGENTS.md) instead. Deploy this only if they
 want to try or develop the prototype, and say so in your first reply.
@@ -69,9 +69,9 @@ timeout 5 dotnet /opt/oricoop-cserver/app-new/CServer.dll --port 47022; echo "ex
 Expected: `OriCoop C-server listening on UDP port 47022`, then `exit 124` (stopped by timeout = it ran).
 `C-server failed: ...` = read the message (usually the port is taken).
 
-The full test suite (36 tests, real UDP on localhost) runs on Windows with `build-cserver.ps1`. On Linux the tests are
-compiled into the binary but not run by publish; if the human wants test results, run `build-cserver.ps1` on a
-Windows machine.
+The full test suites (CServerTest 36, AuthorityTest 31, CServerClientTest 17; real UDP on localhost) run on Windows
+with `build-cserver.ps1`. On Linux the CServerTest code is compiled into the binary but not run by publish; if the
+human wants test results, run `build-cserver.ps1` on a Windows machine.
 
 ## 4. Install (systemd)
 
@@ -122,9 +122,17 @@ journalctl -u oricoop-cserver -n 20 --no-pager      # OriCoop C-server listening
 sudo ss -ulpn | grep -w 47022
 ```
 
-There is no external probe tool for C0 yet: a C-server only answers a full NetPeer handshake followed by `CsJoin`
-(docs/PROTOCOL.md). So a successful deploy is: service active, listening line in the log, port listening, firewall
-rules in place. Tell the human that end-to-end testing from outside needs a client that is not released yet.
+From **outside** the server (a Windows PC with the repo, after `build-cserver.ps1`), run the black-box checks over
+the real network; testing from the server itself does not prove the cloud firewall is open:
+
+```powershell
+.\tests\CServerTest.exe --host <PUBLIC_IP_OR_DOMAIN>:47022     # 12 checks; must end with RESULT PASS
+```
+
+They create short-lived test rooms on that server (in memory; they disappear by themselves). If they fail from
+outside but the service is listening, a firewall layer (section 5) is closed. No Windows PC available: then a
+successful deploy is service active + listening line + port listening + firewall rules in place; say that the
+external check was not run.
 
 ## 7. Upgrade and roll back
 
@@ -156,7 +164,7 @@ default `CMD` sets `--port 47022`, which overrides `ORICOOP_CSERVER_PORT`).
 
 Windows:
 ```powershell
-.\build-cserver.ps1                              # build + 36 tests
+.\build-cserver.ps1                              # build + all tests
 .\server\CServer.exe --port 47022 --log .\logs   # Ctrl+C stops it
 New-NetFirewallRule -DisplayName 'OriCoop C-server' -Direction Inbound -Protocol UDP -LocalPort 47022 -Action Allow   # admin, confirm first
 ```
@@ -166,7 +174,7 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 
 | Symptom | Cause / fix |
 |---|---|
-| "Deployed but the game cannot use it" | Expected for C0: no client connects to the C-server yet. Use oricoop-relay to play. |
+| "Deployed but the game cannot use it" | Expected for now: no released client connects to the C-server yet. Use oricoop-relay to play. |
 | Opened TCP 47022 | The server is UDP only. |
 | Docker `COPY failed` | Build context must be the repo root: `docker build -f server/Dockerfile .` |
 | Unit fails with 203/EXEC | Wrong dotnet path in `ExecStart=`. |
