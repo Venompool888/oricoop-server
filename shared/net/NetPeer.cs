@@ -42,6 +42,7 @@ namespace OriCoop.Net
         private readonly Random random = new Random();
         private readonly IDatagramTransport transport;
         private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly Func<double> nowMs;
         private readonly NetStats stats = new NetStats();
         private readonly NetSim sim = new NetSim();
         private readonly byte[] receiveBuffer = new byte[65536];
@@ -122,12 +123,17 @@ namespace OriCoop.Net
             this.transport = transport;
         }
 
+        internal NetPeer(IDatagramTransport transport, Func<double> nowMs) : this(transport)
+        {
+            this.nowMs = nowMs;
+        }
+
         public PeerState State { get { return state; } }
         public EndPoint Remote { get { return remote; } }
         public string DisconnectReason { get { return disconnectReason; } }
         public NetStats Stats { get { return stats; } }
         public NetSim Sim { get { return sim; } }
-        public double NowMs { get { return clock.Elapsed.TotalMilliseconds; } }
+        public double NowMs { get { return nowMs == null ? clock.Elapsed.TotalMilliseconds : nowMs(); } }
         // Zero uses ProtocolVersion; exposed only to exercise version rejection.
         public ushort ProtocolVersionOverride { get; set; }
         // 10 s: Wi-Fi roaming / router hiccups of ~5-8 s should not drop the link (lag test ②); NetHud shows a hint after 1 s of silence.

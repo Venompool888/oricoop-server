@@ -1,17 +1,18 @@
 # OriCoop Server (C-server)
 
-> **Prototype. Not connected to the game yet: you cannot play with it.** No OriCoop client release talks to this
-> server so far. For playing online today, use the tunnel relay
-> [oricoop-relay](https://github.com/Venompool888/oricoop-relay).
+> **Experimental.** The OriCoop client release **v0.2.0-2026.11.17** can connect to this server (menu: Server → 服务器（平等模式）),
+> but server mode is still being built: some world and enemy sync still follows the host. For the most tested way to
+> play online, use the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same release tag).
 >
-> **原型阶段。还没有接入游戏客户端，现在不能用来玩。** 目前没有任何 OriCoop 客户端版本会连接这个服务器。
-> 现在要联机，请用隧道中继 [oricoop-relay](https://github.com/Venompool888/oricoop-relay)。
+> **实验阶段。** OriCoop 客户端发布版 **v0.2.0-2026.11.17** 可以连接这个服务器（菜单：服务器 → 服务器（平等模式）），
+> 但服务器模式还在开发中，部分世界和敌人同步仍以主机为准。最稳定的联机方式仍是隧道中继
+> [oricoop-relay](https://github.com/Venompool888/oricoop-relay)（同一个发布标签）。
 
 | | |
 |---|---|
-| Stage / 阶段 | **Prototype**: server + arbiter (C0), plus the pure C# client-side authority layer (C1/C2: `IAuthority`, P2P-host arbiter, C-server client). No gameplay code uses it yet. 原型：服务器和裁判（C0），加上客户端的纯 C# 权威层（C1/C2），还没有玩法代码调用它 |
+| Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
 | Protocol / 协议 | **C-server wire protocol v1** (`CsJoin.proto = 1`), see [docs/PROTOCOL.md](docs/PROTOCOL.md) |
-| Matching client / 对应客户端 | **None yet.** A future OriCoop release will list the version here. 暂无，以后的客户端版本会写在这里 |
+| Matching client / 对应客户端 | OriCoop release **v0.2.0-2026.11.17** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.0-2026.11.17**（客户端仓库和 oricoop-relay 用同一个标签） |
 | Players per room / 每房人数 | 1-4 |
 | Default port / 默认端口 | **UDP 47022** (the tunnel relay uses 47020) |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |

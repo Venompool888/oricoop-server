@@ -2,10 +2,10 @@
 
 You are an AI agent asked to build, test or deploy this server for a human. Follow this file in order.
 
-**First, tell the human the stage:** this is a **prototype** (server C0 plus client-side groundwork). No OriCoop game client connects to it yet, so a
-deployed C-server cannot be used for playing. If the human wants to play online now, they need the tunnel relay
-[oricoop-relay](https://github.com/Venompool888/oricoop-relay) (see its AGENTS.md) instead. Deploy this only if they
-want to try or develop the prototype, and say so in your first reply.
+**First, tell the human the stage:** this is **experimental**. The OriCoop client release v0.2.0-2026.11.17
+can connect to it (menu: Server → 服务器（平等模式）), but server-mode gameplay sync is still partly done. The most
+tested way to play online is the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same
+release tag; see its AGENTS.md). Server and client must come from the same release tag. Say this in your first reply.
 
 What it is: one .NET process, one UDP port (**default 47022**), 1-4 players per room, rooms in memory only. No
 database, no TLS, no TCP port. Protocol: C-server wire protocol v1 ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
@@ -24,7 +24,7 @@ database, no TLS, no TCP port. Protocol: C-server wire protocol v1 ([docs/PROTOC
 
 ## 1. Ask the human first
 
-1. Do they understand it is a prototype that the game cannot use yet? (Section above.)
+1. Do they understand it is experimental, and which OriCoop client release do their players use? (Must be v0.2.0-2026.11.17.)
 2. Where: SSH host / user (sudo?), or "this machine".
 3. Port: UDP 47022 unless they want another.
 4. Install method: systemd + .NET 8 (default) or Docker.
@@ -174,7 +174,7 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 
 | Symptom | Cause / fix |
 |---|---|
-| "Deployed but the game cannot use it" | Expected for now: no released client connects to the C-server yet. Use oricoop-relay to play. |
+| Client cannot connect / version error | Client and server must be the same release tag (v0.2.0-2026.11.17). Older clients have no server mode. |
 | Opened TCP 47022 | The server is UDP only. |
 | Docker `COPY failed` | Build context must be the repo root: `docker build -f server/Dockerfile .` |
 | Unit fails with 203/EXEC | Wrong dotnet path in `ExecStart=`. |
@@ -185,5 +185,5 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 ## 10. Report back to the human
 
 Address and port (`host:47022`), install method and paths, firewall changes made and any left for them, service status
-and the listening line, whether the event log is on and where, how to upgrade / roll back, and a reminder that the
-game cannot use this server yet.
+and the listening line, whether the event log is on and where, how to upgrade / roll back, and which client release
+(v0.2.0-2026.11.17) players need.
