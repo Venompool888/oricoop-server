@@ -46,7 +46,8 @@ namespace OriCoop.CServer
             public RoutedTransport Route;
             public NetPeer Peer;
             public Room Room;
-            public int Seat;
+            public List<int> Seats = new List<int>();
+            public int PrimarySeat { get { return Arbiter.PrimarySeat(Seats); } }
             public double ClosingAt = -1;
         }
 
@@ -54,11 +55,11 @@ namespace OriCoop.CServer
         {
             public string Code;
             public Arbiter Arbiter;
-            public readonly Dictionary<int, Connection> Members = new Dictionary<int, Connection>();
+            public readonly List<Connection> Members = new List<Connection>();
             public StreamWriter Log;
         }
 
-        const string CodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        const string CodeAlphabet = "23456789";   // T-046: six-digit codes from 2-9 only, so older clients (alphabet A-Z + 2-9) can still type and accept them
         readonly Dictionary<EndPoint, Connection> peers = new Dictionary<EndPoint, Connection>();
         readonly Dictionary<string, Room> rooms = new Dictionary<string, Room>();
         readonly byte[] buffer = new byte[65536];
@@ -76,6 +77,7 @@ namespace OriCoop.CServer
             this.options = options; this.logDirectory = logDirectory;
         }
         public int LocalPort { get { return socket.LocalPort; } }
+        public long DroppedSenders { get; private set; }
         public long DroppedStates
         {
             get
@@ -111,9 +113,10 @@ namespace OriCoop.CServer
                         Convert.ToBase64String(Encoding.UTF8.GetBytes(e.Key)) + " " + Convert.ToBase64String(e.Data));
                     room.Log.Flush();
                 }
-                foreach (KeyValuePair<int, Connection> member in room.Members)
-                    if (item.To == 0 || item.To == member.Key || (item.To < 0 && -item.To != member.Key))
-                        Send(member.Value, item.Message, reliable);
+                foreach (Connection member in room.Members)
+                    if (item.To == 0 || member.Seats.Contains(item.To) ||
+                        (item.To < 0 && !member.Seats.Contains(-item.To)))
+                        Send(member, item.Message, reliable);
             }
         }
 
@@ -122,8 +125,8 @@ namespace OriCoop.CServer
             peers.Remove(connection.Endpoint);
             connection.Route.Dispose();
             if (connection.Room == null) return;
-            connection.Room.Members.Remove(connection.Seat);
-            Dispatch(connection.Room, connection.Room.Arbiter.Offline(connection.Seat, clock.Elapsed.TotalMilliseconds), true);
+            connection.Room.Members.Remove(connection);
+            Dispatch(connection.Room, connection.Room.Arbiter.Offline(connection.PrimarySeat, clock.Elapsed.TotalMilliseconds), true);
         }
 
         string NewCode()
@@ -149,7 +152,7 @@ namespace OriCoop.CServer
         {
             Room room = null;
             byte failure = 0;
-            if (request.Proto != 1 || request.Mode > 2) failure = 3;
+            if (request.Proto != 2 || request.Mode > 2) failure = 3;
             else if (request.Mode == 0)
             {
                 string code = NewCode();
@@ -169,17 +172,23 @@ namespace OriCoop.CServer
             Send(connection, welcome, true);
             if (seat != 0)
             {
-                Connection previous;
-                if (room.Members.TryGetValue(seat, out previous))
+                Connection previous = Owner(room, seat);
+                if (previous != null)
                 {
-                    room.Members.Remove(seat);
+                    room.Members.Remove(previous);
                     previous.Room = null;
                     previous.Peer.Disconnect("replaced");
                 }
-                connection.Room = room; connection.Seat = seat;
-                room.Members.Add(seat, connection);
+                connection.Room = room; connection.Seats = room.Arbiter.ConnectionSeats(seat);
+                room.Members.Add(connection);
             }
             Dispatch(room, output, true);
+        }
+
+        static Connection Owner(Room room, int seat)
+        {
+            foreach (Connection member in room.Members) if (member.Seats.Contains(seat)) return member;
+            return null;
         }
 
         void Receive(Connection connection, byte[] bytes, bool reliable, double nowMs)
@@ -192,24 +201,30 @@ namespace OriCoop.CServer
                 Join(connection, CsWire.Decode(bytes), nowMs);
                 return;
             }
-            if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsTo)
+            if (!connection.Seats.Contains(bytes[1])) { DroppedSenders++; return; }
+            if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsSeatRelease)
             {
                 CsMessage message = CsWire.Decode(bytes);
                 if (message.Type == CsWire.CsTo)
                 {
                     if (message.Inner.Length < 2) return;
-                    message.Inner[1] = (byte)connection.Seat;
-                    Connection target;
-                    if (connection.Room.Members.TryGetValue(message.Target, out target)) Send(target, message.Inner, reliable);
+                    if (!connection.Seats.Contains(message.Inner[1])) { DroppedSenders++; return; }
+                    // CsTo wraps game traffic only; never tunnel server/control messages to another client.
+                    if (message.Inner[0] >= CsWire.CsJoin && message.Inner[0] <= CsWire.CsSeatRelease) return;
+                    Connection target = Owner(connection.Room, message.Target);
+                    if (target != null && target != connection) Send(target, message.Inner, reliable);
                 }
                 else
-                    Dispatch(connection.Room, connection.Room.Arbiter.Handle(connection.Seat, message, nowMs),
-                        message.Type == CsWire.CsState ? reliable : true);
+                {
+                    int primary = connection.PrimarySeat;
+                    List<Outgoing> output = connection.Room.Arbiter.Handle(message.Seat, message, nowMs);
+                    connection.Seats = connection.Room.Arbiter.ConnectionSeats(primary);
+                    Dispatch(connection.Room, output, message.Type == CsWire.CsState ? reliable : true);
+                }
                 return;
             }
-            bytes[1] = (byte)connection.Seat;
-            foreach (KeyValuePair<int, Connection> member in connection.Room.Members)
-                if (member.Key != connection.Seat) Send(member.Value, bytes, reliable);
+            foreach (Connection member in connection.Room.Members)
+                if (member != connection) Send(member, bytes, reliable);
         }
 
         public void Step()

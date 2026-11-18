@@ -31,10 +31,15 @@ namespace OriCoop.CServer
             public int Snapshots, Resets;
             public bool Left;
 
-            public Client(byte mode, string code, byte[] token)
+            public Client(byte mode, string code, byte[] token) : this(mode, code, token, 1) { }
+
+            public Client(byte mode, string code, byte[] token, byte count)
             {
+                CsIdentity[] identities = new CsIdentity[count];
+                for (int i = 0; i < count; i++)
+                    identities[i] = new CsIdentity { Steam = (ulong)(clients.Count * 10 + i + 1), Nick = "player" + i };
                 Session = new CServerClient(new IPEndPoint(IPAddress.Loopback, server.LocalPort),
-                    mode, code, token, (ulong)(clients.Count + 1), "player" + (clients.Count + 1));
+                    mode, code, token, count, identities);
                 Session.SeatAssigned += Assigned.Add;
                 Session.SeatOnline += Online.Add;
                 Session.SeatOffline += Offline.Add;
@@ -75,7 +80,7 @@ namespace OriCoop.CServer
                 byte[] bytes; bool reliable;
                 while (c.Session.Peer.TryReceive(out bytes, out reliable))
                 {
-                    if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsTo)
+                    if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsSeatRelease)
                     {
                         if (bytes[0] == CsWire.CsSnapshot) c.Snapshots++;
                         c.Session.Receive(bytes);
@@ -159,11 +164,11 @@ namespace OriCoop.CServer
                 a.Online.Contains(2) && a.Online.Contains(3) && b.Online.Contains(1) && c.Online.Contains(1) &&
                 a.Arbiters.Count == 1 && b.Arbiters.Count == 1 && c.Arbiters.Count == 1);
 
-            byte[] game = new byte[] { 1, 4, 90 };
+            byte[] game = new byte[] { 1, 2, 90 };
             b.Session.Peer.SendUnreliable(game, 0, game.Length);
             bool forwarded = Until(delegate { return a.Game.Count == 1 && c.Game.Count == 1; }, 700);
             RunFor(30);
-            Check("game_rewrites_seat_2_no_echo", forwarded && b.Game.Count == 0 &&
+            Check("game_accepts_seat_2_no_echo", forwarded && b.Game.Count == 0 &&
                 a.Game[0].Type == 1 && c.Game[0].Type == 1 && a.Game[0].Seat == 2 && c.Game[0].Seat == 2 &&
                 !a.Game[0].Reliable && !c.Game[0].Reliable && a.Game[0].Value == 90 && c.Game[0].Value == 90);
 
@@ -240,6 +245,49 @@ namespace OriCoop.CServer
             Check("cs_error_join_failed", rejoin.Failures.Count == 1 && rejoin.Failures[0] == "测试错误");
         }
 
+        static void MultiSeatTests()
+        {
+            Client a = new Client(0, "", null, 2); clients.Add(a);
+            Until(delegate { return a.Session.Seats.Count == 2 && a.Session.IsArbiter; }, 1500);
+            Client b = Join(1, a.Session.Code, null);
+            Check("multi_client_seats_primary_authority", a.Session.Seats.Count == 2 &&
+                a.Session.Seats[0] == 1 && a.Session.Seats[1] == 2 && a.Session.PrimarySeat == 1 &&
+                a.Session.Authority.LocalSeat == 1 && b.Session.PrimarySeat == 3 && a.Session.IsArbiter);
+            a.Session.SendAs(2, 30, true, delegate(BinaryWriter w) { w.Write((byte)9); });
+            Check("multi_client_sendas_secondary", Until(delegate { return b.Game.Count == 1; }, 700) &&
+                b.Game[0].Seat == 2 && b.Game[0].Value == 9);
+            bool rejected = false;
+            try { a.Session.SendAs(3, 30, true, null); } catch (ArgumentException) { rejected = true; }
+            Check("multi_client_sendas_unowned_rejected", rejected);
+            b.Session.SendTo(2, 31, true, delegate(BinaryWriter w) { w.Write((byte)8); });
+            Check("multi_client_sendto_secondary", Until(delegate { return a.Game.Count == 1; }, 700) &&
+                a.Game[0].Type == 31 && a.Game[0].Seat == 3);
+            a.Session.SendToAs(2, 3, 32, true, delegate(BinaryWriter w) { w.Write((byte)7); });
+            Check("multi_client_sendtoas_secondary", Until(delegate { return b.Game.Count == 2; }, 700) &&
+                b.Game[1].Type == 32 && b.Game[1].Seat == 2);
+            // Seat 2's lease must survive adding/releasing a different local seat.
+            a.Session.SendAs(2, CsWire.Encode(new CsMessage { Type = CsWire.CsLease, Op = 1, Key = "secondary", Score = 1 }), true);
+            Until(delegate { return b.Session.Authority.OwnerOf("secondary") == 2; }, 700);
+            a.Session.AddSeat(444, "extra");
+            bool added = Until(delegate { return a.Session.Seats.Count == 3; }, 700);
+            Check("multi_client_add_seat_keeps_secondary_lease", added && a.Session.Seats[2] == 4 &&
+                b.Session.Authority.OwnerOf("secondary") == 2 && a.Session.Authority.LocalSeat == 1);
+            a.Session.ReleaseSeat(4);
+            bool released = Until(delegate { return a.Session.Seats.Count == 2; }, 700);
+            a.Session.SendAs(2, CsWire.Encode(new CsMessage { Type = CsWire.CsState, Key = "secondary", Epoch = 1,
+                Ver = 1, Data = new byte[] { 9 } }), true);
+            bool state = Until(delegate { return b.States.Count == 1; }, 700);
+            Check("multi_client_release_other_lease_survives", released && state && b.States[0].From == 2 &&
+                b.Session.Authority.OwnerOf("secondary") == 2);
+            byte[] token = a.Session.Token; string code = a.Session.Code;
+            a.Leave();
+            Check("multi_client_offline_all", Until(delegate { return b.Offline.Contains(1) && b.Offline.Contains(2); }, 700));
+            Client rejoin = Join(2, code, token);
+            Check("multi_client_rejoin_restores_all", Until(delegate { return rejoin.Session.Seats.Count == 2; }, 700) &&
+                rejoin.Session.Seats[0] == 1 && rejoin.Session.Seats[1] == 2 && rejoin.Session.IsArbiter &&
+                rejoin.Snapshots == 1 && rejoin.Session.Authority.LocalSeat == 1);
+        }
+
         public static int Main()
         {
             try
@@ -248,6 +296,7 @@ namespace OriCoop.CServer
                     MinHoldMs = 500, RoomIdleMs = 1500 });
                 server.Start(0);
                 Tests();
+                MultiSeatTests();
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }
             finally

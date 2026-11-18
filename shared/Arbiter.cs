@@ -136,47 +136,109 @@ namespace OriCoop.Authority
             return output;
         }
 
+        public static int PrimarySeat(IEnumerable<int> seatSet)
+        {
+            int primary = 0;
+            foreach (int seat in seatSet) if (primary == 0 || seat < primary) primary = seat;
+            return primary;
+        }
+
+        // All seats of a device share the same token object; seat identity/lease ownership stays independent.
+        public List<int> ConnectionSeats(int seat)
+        {
+            List<int> owned = new List<int>();
+            if (seat < 1 || seat > 4 || seats[seat] == null) return owned;
+            byte[] token = seats[seat].Token;
+            for (int s = 1; s <= 4; s++)
+                if (seats[s] != null && seats[s].Token == token) owned.Add(s);
+            return owned;
+        }
+
+        CsMessage Welcome(byte result, List<int> owned)
+        {
+            int primary = PrimarySeat(owned);
+            CsMessage message = new CsMessage { Type = CsWire.CsWelcome, Result = result, Code = code,
+                Token = primary == 0 ? new byte[16] : seats[primary].Token, LastEvent = lastEvent };
+            message.Seats.AddRange(owned);
+            return message;
+        }
+
         public List<Outgoing> Join(CsMessage request, double nowMs, out int seat, out byte[] welcome)
         {
             List<Outgoing> output = Tick(nowMs);
-            seat = 0;
+            List<int> owned = new List<int>();
             byte result = 0;
-            if (request.Proto != 1 || request.Mode > 2) result = 3;
+            if (request.Proto != 2 || request.Mode > 2 || request.Count < 1 || request.Count > 3 ||
+                (request.Identities.Count != request.Count && !(request.Count == 1 && request.Identities.Count == 0))) result = 3;
             else if (request.Mode == 2)
             {
                 string token = Convert.ToBase64String(request.Token);
                 for (int s = 1; s <= 4; s++)
-                    if (seats[s] != null &&
-                        Convert.ToBase64String(seats[s].Token) == token) { seat = s; break; }
-                if (seat == 0) result = 4;
-                else if (seats[seat].Online) output.AddRange(Offline(seat, nowMs));
+                    if (seats[s] != null && Convert.ToBase64String(seats[s].Token) == token)
+                    { owned = ConnectionSeats(s); break; }
+                if (owned.Count == 0) result = 4;
+                else if (seats[owned[0]].Online) output.AddRange(Offline(owned[0], nowMs));
             }
             else
             {
-                for (int s = 1; s <= 4; s++) if (seats[s] == null) { seat = s; break; }
-                if (seat == 0) result = 2;
+                for (int s = 1; s <= 4 && owned.Count < request.Count; s++)
+                    if (seats[s] == null) owned.Add(s);
+                if (owned.Count != request.Count) { owned.Clear(); result = 2; }
                 else
                 {
                     byte[] token = new byte[16];
-                    lock (Random) Random.GetBytes(token);   // .NET 3.5: RNGCryptoServiceProvider is not IDisposable
-                    seats[seat] = new SeatInfo { Token = token, Steam = request.Steam, Nick = request.Nick };
+                    lock (Random) Random.GetBytes(token);
+                    for (int i = 0; i < owned.Count; i++)
+                    {
+                        CsIdentity identity = request.Identities.Count == 0
+                            ? new CsIdentity { Steam = request.Steam, Nick = request.Nick } : request.Identities[i];
+                        seats[owned[i]] = new SeatInfo { Token = token, Steam = identity.Steam, Nick = identity.Nick };
+                    }
                 }
             }
-            uint after = 0;
+            seat = PrimarySeat(owned);
+            uint after = seat == 0 ? 0 : seats[seat].LastEvent;
             if (result == 0)
-            {
-                after = seats[seat].LastEvent;
-                seats[seat].Online = true;
-                seats[seat].NewSession();   // a (re)joining client restarts its seq at 1
-            }
-            welcome = CsWire.Encode(new CsMessage { Type = CsWire.CsWelcome, Result = result,
-                AssignedSeat = (byte)seat, Code = code, Token = seat == 0 ? new byte[16] : seats[seat].Token,
-                LastEvent = lastEvent });
+                foreach (int s in owned) { seats[s].Online = true; seats[s].NewSession(); }
+            welcome = CsWire.Encode(Welcome(result, owned));
             if (result == 0)
             {
                 Snapshot(output, seat, after, nowMs);
                 Roster(output, nowMs);
             }
+            return output;
+        }
+
+        List<Outgoing> ChangeSeat(int seat, CsMessage request, double nowMs)
+        {
+            List<Outgoing> output = new List<Outgoing>();
+            List<int> owned = ConnectionSeats(seat);
+            int primary = PrimarySeat(owned);
+            if (request.Type == CsWire.CsSeatAdd)
+            {
+                int free = 0;
+                for (int s = 1; s <= 4; s++) if (seats[s] == null) { free = s; break; }
+                if (free == 0) { Add(output, primary, Welcome(2, owned), nowMs); return output; }
+                seats[free] = new SeatInfo { Token = seats[primary].Token, Online = true,
+                    Steam = request.Steam, Nick = request.Nick };
+            }
+            else
+            {
+                if (!owned.Contains(request.Target) || request.Target == primary)
+                {
+                    Add(output, primary, new CsMessage { Type = CsWire.CsError, ErrorCode = 2,
+                        Text = "cannot release primary or unowned seat" }, nowMs);
+                    return output;
+                }
+                int released = request.Target;
+                seats[released] = null;
+                foreach (LeaseInfo lease in leases.Values) lease.Interest.Remove(released);
+                foreach (KeyValuePair<string, LeaseInfo> pair in leases)
+                    if (pair.Value.Owner == released) Handoff(pair.Key, pair.Value, output, nowMs);
+            }
+            owned = ConnectionSeats(primary);
+            Add(output, primary, Welcome(0, owned), nowMs);
+            Roster(output, nowMs);
             return output;
         }
 
@@ -224,10 +286,15 @@ namespace OriCoop.Authority
         {
             List<Outgoing> output = new List<Outgoing>();
             if (!IsOnline(seat, nowMs)) return output;
-            seats[seat].Online = false; seats[seat].OfflineAt = nowMs; seats[seat].LastEvent = lastEvent;
-            foreach (LeaseInfo lease in leases.Values) lease.Interest.Remove(seat);
+            List<int> owned = ConnectionSeats(seat);
+            // Mark the entire device offline before choosing successors (never hand off to its other seat).
+            foreach (int s in owned)
+            {
+                seats[s].Online = false; seats[s].OfflineAt = nowMs; seats[s].LastEvent = lastEvent;
+                foreach (LeaseInfo lease in leases.Values) lease.Interest.Remove(s);
+            }
             foreach (KeyValuePair<string, LeaseInfo> pair in leases)
-                if (pair.Value.Owner == seat) Handoff(pair.Key, pair.Value, output, nowMs);
+                if (owned.Contains(pair.Value.Owner)) Handoff(pair.Key, pair.Value, output, nowMs);
             bool any = false;
             for (int s = 1; s <= 4; s++) if (IsOnline(s, nowMs)) any = true;
             if (!any) emptyAt = nowMs;
@@ -239,6 +306,8 @@ namespace OriCoop.Authority
         {
             List<Outgoing> output = new List<Outgoing>();
             if (!IsOnline(seat, nowMs)) return output;
+            if (request.Type == CsWire.CsSeatAdd || request.Type == CsWire.CsSeatRelease)
+                return ChangeSeat(seat, request, nowMs);
             LeaseInfo lease;
             if (request.Type == CsWire.CsLease)
             {

@@ -1,4 +1,7 @@
-# C-server wire protocol v1 / 线协议 v1 (prototype C0)
+# C-server wire protocol v2 / 线协议 v2 (multi-seat devices)
+
+**v2 servers reject v1 clients** (`CsWelcome.result = 3`, before the old payload is parsed). Client and server must
+come from the same OriCoop release. / **v2 服务器拒绝 v1 客户端**（返回 `result=3`），客户端和服务器必须来自同一个发布版。
 
 Transport: `shared/net/NetPeer.cs` (the OriCoop mod's own UDP layer: "CO" handshake, reliable / unreliable channels,
 fragments, ACKs). After the handshake every application message is `[type u8][seat u8][payload]`, the same framing
@@ -7,13 +10,13 @@ the mod uses between players.
 传输层是 `shared/net/NetPeer.cs`（mod 自己的 UDP 层："CO" 握手、可靠/不可靠、分片、ACK）。连上后每条应用消息是
 `[类型 u8][座位 u8][内容]`，和 mod 里玩家之间的格式相同。
 
-C-server control messages use ids 176-186 (0xB0-0xBA). Strings are `u8 length + UTF-8`; integers are little endian.
-C-server 控制消息占 176–186（0xB0–0xBA）。字符串 = `u8 长度 + UTF-8`；整数小端。
+C-server control messages use ids 176-188 (0xB0-0xBC). Strings are `u8 length + UTF-8`; integers are little endian.
+C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + UTF-8`；整数小端。
 
 | id | name | direction | payload |
 |---|---|---|---|
-| 176 | CsJoin | client → server | `proto u8 (=1)`, `mode u8` (0 new room / 1 join by code / 2 reconnect by token), `code str`, `token 16B`, `steam u64`, `nick str` |
-| 177 | CsWelcome | server → client | `result u8` (0 ok, 1 no such room, 2 full, 3 protocol mismatch, 4 bad token), `seat u8`, `code str`, `token 16B`, `lastEvent u32` |
+| 176 | CsJoin | client → server | `proto u8 (=2)`, `mode u8` (0 new room / 1 join by code / 2 reconnect by token), `code str`, `token 16B`, `count u8` (1-3), then per seat `steam u64, nick str` |
+| 177 | CsWelcome | server → client | `result u8` (0 ok, 1 no such room, 2 full, 3 protocol mismatch, 4 bad token), `count u8 + seats[count] u8` (ascending), `code str`, the connection's `token 16B`, `lastEvent u32` |
 | 178 | CsRoster | server → all | `n u8`, then per seat `seat u8, online u8, steam u64, nick str` |
 | 179 | CsLease | client → server | `op u8` (1 request, 2 release), `key str`, `score f32`, `active u8` |
 | 180 | CsGrant | server → all | `key str`, `owner u8` (0 = nobody), `epoch u32` |
@@ -22,17 +25,32 @@ C-server 控制消息占 176–186（0xB0–0xBA）。字符串 = `u8 长度 + U
 | 183 | CsState | both | `key str`, `epoch u32`, `ver u32`, `active u8`, `len u16 + blob`. Accepted only from the current owner with a higher version; forwarded to the others |
 | 184 | CsSnapshot | server → new seat | all leases (as 180) + all states (as 183); then the events it has not seen are replayed |
 | 185 | CsError | server → client | `code u8`, `text str` |
-| 186 | CsTo | client → server → one seat | `target u8` + a complete inner message |
+| 186 | CsTo | client → server → the connection owning a seat | `target u8` + a complete inner message |
+| 187 | CsSeatAdd | client → server | `steam u64, nick str`: ask for one more seat (lowest free) |
+| 188 | CsSeatRelease | client → server | `seat u8`: free one non-primary seat of this connection now |
 
-All other message types (1-65 etc.) are forwarded to every other seat in the room with the seat byte rewritten to the
-real sender. / 其他类型（1–65 等）服务器改写座位字节后转发给房间里其他所有座位。
+## Multi-seat devices / 一台设备多个座位 (v2)
+
+- One connection = one device, which can hold several seats. A room still has **4 seats** (not 4 connections).
+  PrimarySeat = the connection's lowest seat. / 一个连接代表一台设备，可带多个座位；房间仍是 4 座。
+- The header sender of normal and control messages must be a seat owned by that connection; otherwise the message is
+  dropped (`DroppedSenders`). The server no longer rewrites the sender. / sender 必须属于该连接，否则丢弃，不再改写。
+- Other message types (1-65 etc.) are forwarded once to each other connection. CsTo checks the outer and inner sender,
+  the inner message must be a normal game message, and it is routed to the target seat's connection (never back to
+  the sender's own connection). State echo suppression is per connection.
+- CsSeatAdd / CsSeatRelease reply with CsWelcome (the full new seat set, same token) and then broadcast Roster; no new
+  Snapshot. Add when full returns `result=2` (set unchanged); an invalid Release returns CsError(code=2). The last
+  seat, and the primary while other seats remain, cannot be released.
+- A reconnect restores the seat set stored for the token; the request's count/identities do not overwrite it.
 
 ## Arbiter rules / 裁判规则 (each one has a test)
 
-1. Seats: the lowest free seat 1-4; the 5th player gets `full`. Each seat gets a random 16-byte token.
-   入座：最低空座 1–4；第 5 人 `full`。每个座位一个随机 16 字节 token。
-2. Disconnect: the seat is marked offline and kept 60 s; reconnecting with the token returns to the same seat. An
-   empty room is deleted after 60 s. / 断线保留座位 60 秒，用 token 重连回原座位；空房间 60 秒后删除。
+1. Seats: a join asks for n = 1-3 seats and gets the n lowest free seats 1-4 atomically, or `full` with none.
+   Each connection gets one random 16-byte token shared by its seats; CsSeatAdd can grow it up to the room limit.
+   入座：请求 1–3 个座位，原子分配最低空座，不够就 `full` 且一个都不给；每个连接一个 token，所有本地座位共用。
+2. Disconnect: all seats of the connection go offline together (then leases move) and are kept 60 s; reconnecting
+   with the token restores all of them. An empty room is deleted after 60 s.
+   断线：该连接的全部座位一起离线（再迁移租约），保留 60 秒；用 token 重连恢复全部座位；空房间 60 秒后删除。
 3. Lease request: granted (epoch + 1, broadcast) if nobody owns the key, the owner is offline, or the owner sent no
    active state for 300 ms and has held it ≥ 500 ms. Otherwise the requester's interest (score) is recorded.
    租约请求：没人拥有 / 拥有者离线 / 拥有者 300 ms 内没有 active 状态且已持有 ≥500 ms → 授予（epoch+1，广播）；否则记录兴趣。
@@ -51,6 +69,8 @@ real sender. / 其他类型（1–65 等）服务器改写座位字节后转发�
    通过的动作分配全局事件编号并广播给所有人（含发起者）。
 7. Late join / reconnect: snapshot first (leases + states), then the events after `lastEvent` (the server keeps the
    latest 4096). / 晚加入或重连：先发快照，再补发之后的事件（保留最近 4096 条）。
+8. Seat add/release does not take the device's other seats offline: their leases, epochs, states and dedup stay
+   valid. A released seat's leases move as in rule 4. / 加减座位不影响该设备其他座位；释放座位的租约按第 4 条迁移。
 
 ## Prototype details / 原型细节
 
@@ -60,7 +80,8 @@ real sender. / 其他类型（1–65 等）服务器改写座位字节后转发�
   seat went offline for a reconnect. `Welcome.lastEvent` is the server's newest event id.
 - `State.ver` keeps increasing across epochs; a lease move keeps the newest state with its original epoch. Only
   `CsState.active` refreshes the activity window.
-- `CsTo` delivers the inner message with its seat corrected; nested control requests are not executed.
+- `CsTo` delivers the inner message unchanged (its sender must belong to the sending connection); nested control
+  requests are not executed.
 - Interest is removed on grant, release or disconnect; tied scores pick the lowest seat.
-- Reconnecting with the token of a seat that is still online first runs Offline (lease hand-over, roster), then the
-  new connection takes over; the old one is disconnected with `replaced`.
+- Reconnecting with the token of a connection that is still online first runs Offline (lease hand-over, roster), then
+  the new connection takes over all its seats; the old one is disconnected with `replaced`.

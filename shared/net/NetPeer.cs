@@ -529,10 +529,23 @@ namespace OriCoop.Net
                         {
                             lastReceive = NowMs; RecordTraffic(recvTraffic, length, false); SendAccept();
                         }
+                        else if (Object.Equals(remote, from))
+                        {
+                            // T-030: our partner started a NEW connection from the same address (a new nonce): its side of
+                            // this session is gone (its link timed out while ours still heard it). End the stale session now
+                            // instead of refusing the partner until our own timeout (10 s); the app listens again and the
+                            // partner's next request is accepted.
+                            RecordTraffic(recvTraffic, length, false);
+                            Note("partner reconnected from " + from + "; ending the stale session");
+                            BecomeDisconnected("partner reconnected");
+                        }
                         else SendPacket(StringPacket(Reject, clientNonce, "full"), from);
                         return;
                     }
                     if (state != PeerState.Listening && state != PeerState.Disconnected) { Note("connect request ignored: state " + state); return; }
+                    // After ending a stale session for a reconnecting partner, accept again only once the app has handled
+                    // that disconnect and listens again (a hub drops this peer's route on the Disconnected event).
+                    if (state == PeerState.Disconnected && disconnectReason == "partner reconnected") return;
                     if (version != ProtocolVersion)
                     {
                         SendPacket(StringPacket(Reject, clientNonce, String.Format("protocol version mismatch: host {0}, guest {1}", ProtocolVersion, version)), from);

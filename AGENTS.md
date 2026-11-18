@@ -2,13 +2,14 @@
 
 You are an AI agent asked to build, test or deploy this server for a human. Follow this file in order.
 
-**First, tell the human the stage:** this is **experimental**. The OriCoop client release v0.2.0-2026.11.17
+**First, tell the human the stage:** this is **experimental**. The OriCoop client release v0.2.1-2026.11.18
 can connect to it (menu: Server → 服务器（平等模式）), but server-mode gameplay sync is still partly done. The most
 tested way to play online is the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same
 release tag; see its AGENTS.md). Server and client must come from the same release tag. Say this in your first reply.
 
 What it is: one .NET process, one UDP port (**default 47022**), 1-4 players per room, rooms in memory only. No
-database, no TLS, no TCP port. Protocol: C-server wire protocol v1 ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
+database, no TLS, no TCP port. Protocol: C-server wire protocol v2 ([docs/PROTOCOL.md](docs/PROTOCOL.md)); v2 servers reject v1 clients. For clients from
+OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 
 ---
 
@@ -24,7 +25,7 @@ database, no TLS, no TCP port. Protocol: C-server wire protocol v1 ([docs/PROTOC
 
 ## 1. Ask the human first
 
-1. Do they understand it is experimental, and which OriCoop client release do their players use? (Must be v0.2.0-2026.11.17.)
+1. Do they understand it is experimental, and which OriCoop client release do their players use? (Must be v0.2.1-2026.11.18.)
 2. Where: SSH host / user (sudo?), or "this machine".
 3. Port: UDP 47022 unless they want another.
 4. Install method: systemd + .NET 8 (default) or Docker.
@@ -174,7 +175,7 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 
 | Symptom | Cause / fix |
 |---|---|
-| Client cannot connect / version error | Client and server must be the same release tag (v0.2.0-2026.11.17). Older clients have no server mode. |
+| Client cannot connect / version error | Client and server must be the same release tag (v0.2.1-2026.11.18). Older clients have no server mode. |
 | Opened TCP 47022 | The server is UDP only. |
 | Docker `COPY failed` | Build context must be the repo root: `docker build -f server/Dockerfile .` |
 | Unit fails with 203/EXEC | Wrong dotnet path in `ExecStart=`. |
@@ -186,4 +187,4 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 
 Address and port (`host:47022`), install method and paths, firewall changes made and any left for them, service status
 and the listening line, whether the event log is on and where, how to upgrade / roll back, and which client release
-(v0.2.0-2026.11.17) players need.
+(v0.2.1-2026.11.18) players need.

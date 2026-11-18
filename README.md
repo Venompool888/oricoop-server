@@ -1,18 +1,18 @@
 # OriCoop Server (C-server)
 
-> **Experimental.** The OriCoop client release **v0.2.0-2026.11.17** can connect to this server (menu: Server → 服务器（平等模式）),
+> **Experimental.** The OriCoop client release **v0.2.1-2026.11.18** can connect to this server (menu: Server → 服务器（平等模式）),
 > but server mode is still being built: some world and enemy sync still follows the host. For the most tested way to
 > play online, use the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same release tag).
 >
-> **实验阶段。** OriCoop 客户端发布版 **v0.2.0-2026.11.17** 可以连接这个服务器（菜单：服务器 → 服务器（平等模式）），
+> **实验阶段。** OriCoop 客户端发布版 **v0.2.1-2026.11.18** 可以连接这个服务器（菜单：服务器 → 服务器（平等模式）），
 > 但服务器模式还在开发中，部分世界和敌人同步仍以主机为准。最稳定的联机方式仍是隧道中继
 > [oricoop-relay](https://github.com/Venompool888/oricoop-relay)（同一个发布标签）。
 
 | | |
 |---|---|
 | Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
-| Protocol / 协议 | **C-server wire protocol v1** (`CsJoin.proto = 1`), see [docs/PROTOCOL.md](docs/PROTOCOL.md) |
-| Matching client / 对应客户端 | OriCoop release **v0.2.0-2026.11.17** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.0-2026.11.17**（客户端仓库和 oricoop-relay 用同一个标签） |
+| Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
+| Matching client / 对应客户端 | OriCoop release **v0.2.1-2026.11.18** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.1-2026.11.18**（客户端仓库和 oricoop-relay 用同一个标签） |
 | Players per room / 每房人数 | 1-4 |
 | Default port / 默认端口 | **UDP 47022** (the tunnel relay uses 47020) |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |
@@ -127,6 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 协议和版本
 
-当前是 **C-server 线协议 v1**（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。还没有对应的客户端版本；以后接入游戏时会在上方表格写明。
+当前是 **C-server 线协议 v2**（一台设备可带多个座位，见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），对应 OriCoop 发布版 **v0.2.1-2026.11.18**。
+v2 服务器拒绝 v1 客户端；OriCoop v0.2.0-2026.11.17 的客户端请用本仓库的标签 `v0.2.0-2026.11.17` 部署。
 
 许可证：[MIT](LICENSE)。
