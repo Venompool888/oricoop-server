@@ -143,6 +143,48 @@ namespace OriCoop.CServer
             return found;
         }
 
+        // T-113: a deliberate leave frees the seat at once; re-entering the room's code rejoins a held seat with the token;
+        // a token the server no longer knows falls back to a fresh join on the same connection.
+        static void LeaveTests()
+        {
+            bool r;
+            Check("plan_join_modes", CServerClient.PlanJoin(true, "", "", null, null, out r) == 0 && !r
+                && CServerClient.PlanJoin(false, "ABC234", "", null, null, out r) == 1 && !r
+                && CServerClient.PlanJoin(false, "ABC234", "XYZ567", new byte[16], null, out r) == 1 && !r
+                && CServerClient.PlanJoin(false, "ABC234", "ABC234", new byte[16], null, out r) == 2 && r
+                && CServerClient.PlanJoin(true, "", "ABC234", new byte[16], "ABC234", out r) == 2 && r
+                && CServerClient.PlanJoin(true, "", "ABC234", new byte[16], null, out r) == 0 && !r);
+            Client a = Join(0, "", null);
+            string code = a.Session.Code;
+            Client b = Join(1, code, null), c = Join(1, code, null), d = Join(1, code, null);
+            bool full = Until(delegate { return a.Online.Count == 4; }, 700);
+            byte[] releasedToken = d.Session.Token; int dSeat = d.Session.Seat;
+            d.Session.ReleaseAll();
+            bool freed = Until(delegate { return a.Offline.Contains(dSeat); }, 700);
+            d.Leave();
+            Client e = Join(1, code, null);
+            Check("leave_releases_seat_for_new_join", full && freed && e.Failures.Count == 0 && e.Assigned.Count == 1 && e.Session.Seat == dSeat);
+
+            // e drops without releasing (crash, or an older client): its seat is held; entering the code again rejoins it.
+            byte[] eToken = e.Session.Token; int eSeat = e.Session.Seat;
+            e.Leave();
+            Until(delegate { return a.Offline.FindAll(delegate(int s) { return s == eSeat; }).Count >= 2; }, 12000);
+            bool rejoin; byte mode = CServerClient.PlanJoin(false, code, code, eToken, null, out rejoin);
+            Client f = new Client(mode, code, rejoin ? eToken : null); f.Session.RejoinFallsBackToJoin = rejoin; clients.Add(f);
+            Until(delegate { return f.Assigned.Count != 0 || f.Failures.Count != 0; }, 1500);
+            Check("reenter_code_rejoins_held_seat", rejoin && mode == 2 && f.Failures.Count == 0 && f.Assigned.Count == 1
+                && f.Session.Seat == eSeat && !f.Session.UsedFallback);
+
+            // A released seat's token is unknown: with a free seat, the client joins fresh instead of failing.
+            int cSeat = c.Session.Seat;
+            c.Session.ReleaseAll(); Until(delegate { return a.Offline.Contains(cSeat); }, 700); c.Leave();
+            Client g = new Client(2, code, releasedToken); g.Session.RejoinFallsBackToJoin = true; clients.Add(g);
+            Until(delegate { return g.Assigned.Count != 0 || g.Failures.Count != 0; }, 1500);
+            Check("unknown_token_falls_back_to_fresh_join", g.Failures.Count == 0 && g.Assigned.Count == 1
+                && g.Session.Seat == cSeat && g.Session.UsedFallback);
+            foreach (Client x in new[] { a, b, f, g }) x.Leave();
+        }
+
         static void Tests()
         {
             Client a = Join(0, "", null);
@@ -228,6 +270,13 @@ namespace OriCoop.CServer
             Client wrong = Join(1, "000000", null);
             Check("wrong_code_chinese_failure", wrong.Failures.Count == 1 && wrong.Failures[0] == "server.err.noroom" &&
                 wrong.Session.Seat == 0 && wrong.Assigned.Count == 0 && !wrong.Session.IsArbiter);
+            // T-148: the refused join is ended (not a connected, seatless peer stuck on "connecting"), with the reason.
+            Check("refused_join_ends_connection", Until(delegate { return wrong.Session.Peer.State != OriCoop.Net.PeerState.Connected; }, 1000)
+                && wrong.Session.RefusedWith == "server.err.noroom");
+            int failuresBefore = wrong.Failures.Count;
+            bool threw = false;
+            try { wrong.Session.Receive(CsWire.Encode(new CsMessage { Type = CsWire.CsWelcome, Result = 7 })); } catch (Exception) { threw = true; }
+            Check("unknown_refusal_code_handled", !threw && wrong.Failures.Count == failuresBefore + 1 && wrong.Failures[wrong.Failures.Count - 1] == "server.err.version");
             wrong.Leave();
             Client fourth = Join(1, code, null);
             Check("fourth_seat", fourth.Session.Seat == 4);
@@ -297,6 +346,7 @@ namespace OriCoop.CServer
                 server.Start(0);
                 Tests();
                 MultiSeatTests();
+                LeaveTests();
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }
             finally

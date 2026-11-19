@@ -11,6 +11,8 @@ namespace OriCoop.Authority
         public double MinHoldMs = 500;
         public int EventKeep = 4096;
         public double RoomIdleMs = 60000;
+        // T-146: a quiet owner loses a lease only to a better (lower) score; after this much silence it counts as stalled.
+        public double StealAnywayMs = 2000;
     }
 
     public sealed class Outgoing
@@ -57,6 +59,7 @@ namespace OriCoop.Authority
             public byte Owner;
             public uint Epoch;
             public double HeldAt, LastActive = Double.NegativeInfinity;
+            public float OwnerScore = Single.PositiveInfinity;   // T-146: the owner's latest request score
             public readonly Dictionary<int, float> Interest = new Dictionary<int, float>();
         }
 
@@ -222,6 +225,20 @@ namespace OriCoop.Authority
                 seats[free] = new SeatInfo { Token = seats[primary].Token, Online = true,
                     Steam = request.Steam, Nick = request.Nick };
             }
+            else if (request.Target == 0)
+            {
+                // T-113: Target 0 = this device leaves the room on purpose: free all its seats now instead of holding them
+                // SeatHoldMs for a reconnect (a 4-player room said "full" to the player rejoining at once). Older servers
+                // answer CsError (unowned seat) and keep the hold; older clients never send Target 0.
+                output.AddRange(Offline(primary, nowMs));
+                foreach (int s in owned)
+                {
+                    seats[s] = null;
+                    foreach (LeaseInfo lease in leases.Values) lease.Interest.Remove(s);
+                }
+                Roster(output, nowMs);
+                return output;
+            }
             else
             {
                 if (!owned.Contains(request.Target) || request.Target == primary)
@@ -264,9 +281,21 @@ namespace OriCoop.Authority
         {
             lease.Owner = (byte)owner; lease.Epoch++;
             lease.HeldAt = nowMs; lease.LastActive = Double.NegativeInfinity;
+            float score;
+            lease.OwnerScore = lease.Interest.TryGetValue(owner, out score) ? score : Single.PositiveInfinity;
             lease.Interest.Remove(owner);
             Add(output, 0, new CsMessage { Type = CsWire.CsGrant, Key = key,
                 Owner = lease.Owner, Epoch = lease.Epoch }, nowMs);
+        }
+
+        // T-146: a quiet owner (no state for ActiveWindowMs, held MinHoldMs) hands the lease only to a score at least as good;
+        // after StealAnywayMs of silence it is stalled and anyone takes over. One lost unreliable heartbeat or a 400 ms
+        // hitch no longer gives an enemy to the far player for good.
+        bool MayTake(LeaseInfo lease, float score, double nowMs)
+        {
+            double quiet = nowMs - lease.LastActive;
+            if (quiet < options.ActiveWindowMs || nowMs - lease.HeldAt < options.MinHoldMs) return false;
+            return quiet >= options.StealAnywayMs || score <= lease.OwnerScore;   // ties may take over, as before
         }
 
         void Handoff(string key, LeaseInfo lease, List<Outgoing> output, double nowMs)
@@ -318,10 +347,9 @@ namespace OriCoop.Authority
                 }
                 if (request.Op == 1)
                 {
-                    if (lease.Owner == seat) return output;
+                    if (lease.Owner == seat) { lease.OwnerScore = request.Score; return output; }
                     lease.Interest[seat] = request.Score;
-                    if (lease.Owner == 0 || !IsOnline(lease.Owner, nowMs) ||
-                        (nowMs - lease.LastActive >= options.ActiveWindowMs && nowMs - lease.HeldAt >= options.MinHoldMs))
+                    if (lease.Owner == 0 || !IsOnline(lease.Owner, nowMs) || MayTake(lease, request.Score, nowMs))
                         Grant(request.Key, lease, seat, output, nowMs);
                 }
                 else if (request.Op == 2)
@@ -333,8 +361,10 @@ namespace OriCoop.Authority
             else if (request.Type == CsWire.CsState)
             {
                 CsStateEntry prior;
+                // T-146: versions are per owner and epoch; a new owner's first state must not be dropped because the old
+                // owner's counter was higher (the new owner then looked silent and the old one took the lease back).
                 if (!leases.TryGetValue(request.Key, out lease) || lease.Owner != seat || lease.Epoch != request.Epoch ||
-                    (states.TryGetValue(request.Key, out prior) && request.Ver <= prior.Ver))
+                    (states.TryGetValue(request.Key, out prior) && prior.Epoch == request.Epoch && request.Ver <= prior.Ver))
                 {
                     droppedStates++; return output;
                 }

@@ -386,6 +386,37 @@ namespace OriCoop.CServer
             Check("multi_released_seat_cannot_send", b.Count(23) == 0 && server.DroppedSenders == drops + 1);
         }
 
+        // T-113: CsSeatRelease Target 0 = the device leaves on purpose: all its seats are freed at once (no SeatHoldMs),
+        // so a 4-player room takes a fresh join right away. Target 1 (the primary) is still refused, as before.
+        static void LeaveLogicTests()
+        {
+            Arbiter room = new Arbiter("LEAVE1", new ArbiterOptions { SeatHoldMs = 60000 }, 0);
+            int seat; byte[] welcome;
+            CsMessage pair = new CsMessage { Type = CsWire.CsJoin, Count = 2 };
+            for (int i = 0; i < 2; i++) pair.Identities.Add(new CsIdentity { Steam = (ulong)(30 + i), Nick = "pair" + i });
+            room.Join(new CsMessage { Type = CsWire.CsJoin }, 0, out seat, out welcome);          // seat 1
+            room.Join(pair, 1, out seat, out welcome);                                             // seats 2+3, one device
+            byte[] pairToken = CsWire.Decode(welcome).Token;
+            room.Join(new CsMessage { Type = CsWire.CsJoin }, 2, out seat, out welcome);           // seat 4
+            room.Join(new CsMessage { Type = CsWire.CsJoin }, 3, out seat, out welcome);
+            bool fullBefore = seat == 0 && CsWire.Decode(welcome).Result == 2;
+            bool refused = false;
+            foreach (Outgoing o in room.Handle(2, new CsMessage { Type = CsWire.CsSeatRelease, Target = 2 }, 4))
+                if (CsWire.Decode(o.Message).Type == CsWire.CsError) refused = true;
+            bool rosterWithout = false;
+            foreach (Outgoing o in room.Handle(2, new CsMessage { Type = CsWire.CsSeatRelease, Target = 0 }, 5))
+            {
+                CsMessage m = CsWire.Decode(o.Message);
+                if (m.Type == CsWire.CsRoster) rosterWithout = m.Roster.TrueForAll(delegate(CsRosterEntry e) { return e.Seat != 2 && e.Seat != 3; });
+            }
+            Check("leave_target0_frees_device_seats", fullBefore && refused && rosterWithout
+                && !room.IsOnline(2, 6) && !room.IsOnline(3, 6) && room.ConnectionSeats(2).Count == 0);
+            room.Join(new CsMessage { Type = CsWire.CsJoin }, 7, out seat, out welcome);
+            Check("leave_then_fresh_join_fits_full_room", seat == 2 && CsWire.Decode(welcome).Result == 0);
+            room.Join(new CsMessage { Type = CsWire.CsJoin, Mode = 2, Token = pairToken }, 8, out seat, out welcome);
+            Check("leave_old_token_unknown", seat == 0 && CsWire.Decode(welcome).Result == 4);
+        }
+
         static void MultiSeatLogicTests()
         {
             Arbiter room = new Arbiter("MULTI2", new ArbiterOptions { SeatHoldMs = 1000 }, 0);
@@ -641,7 +672,7 @@ namespace OriCoop.CServer
                 }
                 else
                 {
-                    WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests();
+                    WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests(); LeaveLogicTests();
                     server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
                         MinHoldMs = 500, RoomIdleMs = 1500 });
                     server.Start(0);

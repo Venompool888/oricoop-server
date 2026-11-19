@@ -27,7 +27,7 @@ C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + U
 | 185 | CsError | server → client | `code u8`, `text str` |
 | 186 | CsTo | client → server → the connection owning a seat | `target u8` + a complete inner message |
 | 187 | CsSeatAdd | client → server | `steam u64, nick str`: ask for one more seat (lowest free) |
-| 188 | CsSeatRelease | client → server | `seat u8`: free one non-primary seat of this connection now |
+| 188 | CsSeatRelease | client → server | `seat u8`: free one non-primary seat of this connection now; `seat = 0`: this device leaves the room and all its seats are freed now (no 60 s hold) |
 
 ## Multi-seat devices / 一台设备多个座位 (v2)
 
@@ -41,6 +41,10 @@ C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + U
 - CsSeatAdd / CsSeatRelease reply with CsWelcome (the full new seat set, same token) and then broadcast Roster; no new
   Snapshot. Add when full returns `result=2` (set unchanged); an invalid Release returns CsError(code=2). The last
   seat, and the primary while other seats remain, cannot be released.
+- CsSeatRelease with `seat = 0` (a deliberate leave): the device goes offline (leases move as for a disconnect), then
+  all its seats are freed at once and Roster is broadcast; its token is no longer valid. Older servers answer it with
+  CsError(code=2) and keep the 60 s hold. / `seat = 0` 表示主动离开：先像断线一样迁移租约，再立即释放全部座位并广播 Roster，
+  token 作废；旧服务器回 CsError(code=2)，照旧保留 60 秒。
 - A reconnect restores the seat set stored for the token; the request's count/identities do not overwrite it.
 
 ## Arbiter rules / 裁判规则 (each one has a test)
@@ -52,12 +56,16 @@ C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + U
    with the token restores all of them. An empty room is deleted after 60 s.
    断线：该连接的全部座位一起离线（再迁移租约），保留 60 秒；用 token 重连恢复全部座位；空房间 60 秒后删除。
 3. Lease request: granted (epoch + 1, broadcast) if nobody owns the key, the owner is offline, or the owner sent no
-   active state for 300 ms and has held it ≥ 500 ms. Otherwise the requester's interest (score) is recorded.
-   租约请求：没人拥有 / 拥有者离线 / 拥有者 300 ms 内没有 active 状态且已持有 ≥500 ms → 授予（epoch+1，广播）；否则记录兴趣。
+   active state for 300 ms, has held it ≥ 500 ms and the requester's score is at least as good (lower or equal) as
+   the owner's latest request score; after 2 s without active state anyone takes over. Otherwise the requester's
+   interest (score) is recorded. One lost heartbeat no longer hands the key to a farther seat.
+   租约请求：没人拥有 / 拥有者离线 / 拥有者 300 ms 内没有 active 状态、已持有 ≥500 ms 且请求者分数不比拥有者差（更低或相等）→ 授予
+   （epoch+1，广播）；拥有者 2 秒没有 active 状态时谁都可以接手；否则记录兴趣。丢一个心跳不再把租约交给更远的座位。
 4. Owner offline or release: the lease goes to the online interested seat with the lowest score (epoch + 1); with no
    interest the owner becomes 0. / 拥有者离线或释放：交给 score 最小的在线有兴趣者；没人就变成 0。
-5. State: accepted only if `epoch` is current, the sender is the owner and `ver` is higher than stored.
-   状态：epoch 是当前、发送者是拥有者、ver 递增才收。
+5. State: accepted only if `epoch` is current, the sender is the owner and `ver` is higher than the stored state of
+   the same epoch (a new owner's first state is accepted even if the old owner's version was higher).
+   状态：epoch 是当前、发送者是拥有者、ver 比同一 epoch 已存的大才收（新拥有者的第一个状态即使版本号比旧拥有者小也收）。
 6. Actions: a repeated `(seat, seq)` is dropped. Dedup is a sliding window of the last 4096 seqs per seat; anything
    older counts as already seen. A seat's window is cleared when it rejoins (a restarted client starts its seq
    again). Claim: the first one for a key wins, later ones get `0xFF`. Release (flags bit1):
