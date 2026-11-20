@@ -2,11 +2,12 @@
 
 > **Experimental.** The OriCoop client release **v0.2.1-2026.11.18** can connect to this server (menu: Server → 服务器（平等模式）),
 > but server mode is still being built: some world and enemy sync still follows the host. For the most tested way to
-> play online, use the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same release tag).
+> play online with v0.2.1, use the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same release tag).
+> The relay is removed from OriCoop after v0.2.1 (T-159): from the next release, online play is LAN host mode or this server.
 >
 > **实验阶段。** OriCoop 客户端发布版 **v0.2.1-2026.11.18** 可以连接这个服务器（菜单：服务器 → 服务器（平等模式）），
-> 但服务器模式还在开发中，部分世界和敌人同步仍以主机为准。最稳定的联机方式仍是隧道中继
-> [oricoop-relay](https://github.com/Venompool888/oricoop-relay)（同一个发布标签）。
+> 但服务器模式还在开发中，部分世界和敌人同步仍以主机为准。v0.2.1 最稳定的联机方式仍是隧道中继
+> [oricoop-relay](https://github.com/Venompool888/oricoop-relay)（同一个发布标签）。v0.2.1 之后 OriCoop 移除了中继（T-159）：下一个发布版起，联机方式是局域网主机模式或本服务器。
 
 | | |
 |---|---|
@@ -14,7 +15,7 @@
 | Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
 | Matching client / 对应客户端 | OriCoop release **v0.2.1-2026.11.18** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.1-2026.11.18**（客户端仓库和 oricoop-relay 用同一个标签） |
 | Players per room / 每房人数 | 1-4 |
-| Default port / 默认端口 | **UDP 47022** (the tunnel relay uses 47020) |
+| Default port / 默认端口 | **UDP 47022** (the v0.2.1 tunnel relay used 47020) |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |
 
 **AI agents: read [AGENTS.md](AGENTS.md) first.** / **让 AI 部署：让它先读 [AGENTS.md](AGENTS.md)。**
@@ -83,7 +84,7 @@ server/   CServer.cs (UDP hub), CServer.csproj (net8.0), Dockerfile
 shared/   pure C# 5 files also compiled into the mod: Arbiter.cs, CsWire.cs (server side), IAuthority.cs,
           AuthorityClient.cs, HostArbiter.cs, INetRouteServer.cs, CServerClient.cs (client side);
           net/ (copies of the mod's NetPeer.cs, Transport.cs)
-tests/    CServerTest.cs (36 + 12 --host checks), AuthorityTest.cs (31), CServerClientTest.cs (17)
+tests/    CServerTest.cs (67 + 12 --host checks), AuthorityTest.cs (31), CServerClientTest.cs (32)
 deploy/   oricoop-cserver.service, oricoop-cserver.env.example
 docs/     PROTOCOL.md
 ```

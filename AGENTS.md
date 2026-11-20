@@ -5,7 +5,8 @@ You are an AI agent asked to build, test or deploy this server for a human. Foll
 **First, tell the human the stage:** this is **experimental**. The OriCoop client release v0.2.1-2026.11.18
 can connect to it (menu: Server → 服务器（平等模式）), but server-mode gameplay sync is still partly done. The most
 tested way to play online is the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same
-release tag; see its AGENTS.md). Server and client must come from the same release tag. Say this in your first reply.
+release tag; see its AGENTS.md). The relay is removed from OriCoop after v0.2.1 (T-159); later releases offer LAN host
+mode and this server. Server and client must come from the same release tag. Say this in your first reply.
 
 What it is: one .NET process, one UDP port (**default 47022**), 1-4 players per room, rooms in memory only. No
 database, no TLS, no TCP port. Protocol: C-server wire protocol v2 ([docs/PROTOCOL.md](docs/PROTOCOL.md)); v2 servers reject v1 clients. For clients from
@@ -19,7 +20,7 @@ OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 - Never print, log or commit secrets (SSH keys, cloud credentials). This server needs no keys of its own.
 - Never commit the human's real server address, host name or SSH alias anywhere public. Use `203.0.113.10` /
   `cserver.example.com` in anything you write back to the repo.
-- Do not touch other services on the host. It can run next to oricoop-relay (47020/udp); pick another port if 47022
+- Do not touch other services on the host. It can run next to an old oricoop-relay (47020/udp); pick another port if 47022
   is taken.
 - Do not disable the firewall. Open exactly one UDP port.
 

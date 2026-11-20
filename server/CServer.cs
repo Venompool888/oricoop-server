@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using OriCoop.Authority;
@@ -12,12 +13,63 @@ namespace OriCoop.CServer
 {
     public sealed class CServer
     {
+        // T-167: the server's UDP socket. Like the client's UdpTransport, but it can wait for data without spinning, and
+        // "no data" is a readiness check instead of a WouldBlock exception (once per idle step, about 1000 a second).
+        sealed class ServerSocket : IDisposable
+        {
+            readonly Socket socket;
+            readonly int localPort;
+            public ServerSocket(int bindPort)
+            {
+                socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                try
+                {
+                    socket.ReceiveBufferSize = 1024 * 1024;
+                    socket.SendBufferSize = 1024 * 1024;
+                    socket.Bind(new IPEndPoint(IPAddress.Any, bindPort));
+                    socket.Blocking = false;
+                    localPort = ((IPEndPoint)socket.LocalEndPoint).Port;
+                    // Windows otherwise reports ICMP port-unreachable as a receive error (SIO_UDP_CONNRESET off).
+                    try { socket.IOControl(-1744830452, new byte[] { 0, 0, 0, 0 }, null); }
+                    catch (Exception) { }
+                }
+                catch { socket.Close(); throw; }
+            }
+            public int LocalPort { get { return localPort; } }
+            public void SendTo(byte[] data, int offset, int length, EndPoint to)
+            {
+                socket.SendTo(data, offset, length, SocketFlags.None, to);
+            }
+            // Nonblocking; zero means no datagram (an empty datagram is read and dropped, so it cannot keep the
+            // socket readable and turn Wait into a spin).
+            public int Receive(byte[] buffer, out EndPoint from)
+            {
+                from = null;
+                if (!socket.Poll(0, SelectMode.SelectRead)) return 0;
+                EndPoint any = new IPEndPoint(IPAddress.Any, 0);
+                try
+                {
+                    int length = socket.ReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref any);
+                    if (length > 0) from = any;
+                    return length;
+                }
+                catch (SocketException) { return 0; }
+            }
+            // Blocks until a datagram arrives or the timeout passes.
+            public void Wait(int timeoutMs)
+            {
+                try { socket.Poll(timeoutMs * 1000, SelectMode.SelectRead); }
+                catch (SocketException) { Thread.Sleep(timeoutMs); }
+            }
+            public void Dispose() { socket.Close(); }
+        }
+
         sealed class RoutedTransport : IDatagramTransport
         {
-            readonly UdpTransport socket;
+            readonly ServerSocket socket;
             readonly EndPoint endpoint;
             readonly Queue<byte[]> incoming = new Queue<byte[]>();
-            public RoutedTransport(UdpTransport socket, EndPoint endpoint)
+            public RoutedTransport(ServerSocket socket, EndPoint endpoint)
             {
                 this.socket = socket; this.endpoint = endpoint;
             }
@@ -67,8 +119,13 @@ namespace OriCoop.CServer
         readonly Stopwatch clock = new Stopwatch();
         readonly ArbiterOptions options;
         readonly string logDirectory;
-        UdpTransport socket;
+        // T-162: when each dropped endpoint was last told its session is gone (at most one Goodbye per 250 ms each).
+        readonly Dictionary<EndPoint, double> staleReplies = new Dictionary<EndPoint, double>();
+        ServerSocket socket;
         static volatile bool quitting;
+        // Receive timeout of each client connection (NetPeer's default); tests shorten it.
+        public int PeerTimeoutMs = 10000;
+        public long StaleGoodbyes { get; private set; }
 
         public CServer() : this(new ArbiterOptions(), null) { }
         public CServer(ArbiterOptions options) : this(options, null) { }
@@ -91,7 +148,7 @@ namespace OriCoop.CServer
         public void Start(int port)
         {
             if (logDirectory != null) Directory.CreateDirectory(logDirectory);
-            socket = new UdpTransport(port); clock.Start();
+            socket = new ServerSocket(port); clock.Start();
             Console.WriteLine("OriCoop C-server listening on UDP port " + LocalPort);
         }
 
@@ -118,6 +175,46 @@ namespace OriCoop.CServer
                         (item.To < 0 && !member.Seats.Contains(-item.To)))
                         Send(member, item.Message, reliable);
             }
+        }
+
+        // T-162: data from an endpoint whose connection is gone (we timed it out while its link failed one way) gets a
+        // Goodbye for its session, so it rejoins now instead of after its own 10 s timeout. Anything else stays ignored.
+        // The reason is "timed out" (what happened, and what the lobby already translates): the Goodbye is then 18 bytes,
+        // smaller than the smallest Data packet (19, an empty keepalive), so a reply never outweighs its request.
+        public const string StaleReason = "timed out";
+        void ReplyStale(EndPoint from, int length, double nowMs)
+        {
+            double last;
+            if (staleReplies.TryGetValue(from, out last) && nowMs - last < 250) return;
+            byte[] goodbye = StaleSessionGoodbye(buffer, length, StaleReason);
+            if (goodbye == null) return;
+            if (staleReplies.Count >= 1024)
+            {
+                List<EndPoint> old = new List<EndPoint>();
+                foreach (KeyValuePair<EndPoint, double> entry in staleReplies) if (nowMs - entry.Value >= 250) old.Add(entry.Key);
+                foreach (EndPoint endpoint in old) staleReplies.Remove(endpoint);
+                if (staleReplies.Count >= 1024) return;
+            }
+            staleReplies[from] = nowMs;
+            socket.SendTo(goodbye, 0, goodbye.Length, from);
+            StaleGoodbyes++;
+        }
+
+        // A NetPeer Goodbye (magic 0x4F43, type 5, the session id, u16 length + UTF-8 reason; little endian) for the
+        // session id in a NetPeer Data packet's header (type 4, at least 19 bytes); null for anything else. Built here
+        // so the fix needs no client change: the client's NetPeer already ends its session on a Goodbye for its id.
+        public static byte[] StaleSessionGoodbye(byte[] packet, int length, string reason)
+        {
+            if (packet == null || length < 19 || length > 1200 || length > packet.Length) return null;
+            if (packet[0] != 0x43 || packet[1] != 0x4F || packet[2] != 4) return null;
+            if (packet[3] == 0 && packet[4] == 0 && packet[5] == 0 && packet[6] == 0) return null;
+            byte[] text = Encoding.UTF8.GetBytes(reason);
+            byte[] goodbye = new byte[9 + text.Length];
+            goodbye[0] = 0x43; goodbye[1] = 0x4F; goodbye[2] = 5;
+            Buffer.BlockCopy(packet, 3, goodbye, 3, 4);
+            goodbye[7] = (byte)text.Length; goodbye[8] = (byte)(text.Length >> 8);
+            Buffer.BlockCopy(text, 0, goodbye, 9, text.Length);
+            return goodbye;
         }
 
         void Disconnected(Connection connection)
@@ -227,8 +324,27 @@ namespace OriCoop.CServer
                 if (member != connection) Send(member, bytes, reliable);
         }
 
+        // T-167: how many times Step ran (the idle test counts wake-ups with it).
+        public long Steps { get { return Interlocked.Read(ref steps); } }
+        long steps;
+
+        // T-167: the server's own loop (Main and the idle test): step, then block until a datagram arrives or the
+        // next step is due. With connections that is 1 ms, the old Sleep(1) cadence (NetPeer resends, keepalives and
+        // timeouts, lease ticks). Rooms without connections only need their seat-hold and idle-room timers (seconds):
+        // 50 ms. Nothing at all: 250 ms, which still answers Ctrl+C promptly. A datagram ends any wait at once.
+        public const int ConnectedWaitMs = 1, RoomsWaitMs = 50, EmptyWaitMs = 250;
+        public void Run(Func<bool> stop)
+        {
+            while (!stop())
+            {
+                Step();
+                socket.Wait(peers.Count > 0 ? ConnectedWaitMs : rooms.Count > 0 ? RoomsWaitMs : EmptyWaitMs);
+            }
+        }
+
         public void Step()
         {
+            Interlocked.Increment(ref steps);
             double nowMs = clock.Elapsed.TotalMilliseconds;
             foreach (Room room in rooms.Values) Dispatch(room, room.Arbiter.Tick(nowMs), true);
             EndPoint from; int length;
@@ -237,9 +353,14 @@ namespace OriCoop.CServer
                 Connection connection;
                 if (!peers.TryGetValue(from, out connection))
                 {
-                    if (length != 13 || buffer[0] != 0x43 || buffer[1] != 0x4F || buffer[2] != 1) continue;
+                    if (length != 13 || buffer[0] != 0x43 || buffer[1] != 0x4F || buffer[2] != 1)
+                    {
+                        ReplyStale(from, length, nowMs);
+                        continue;
+                    }
                     connection = new Connection { Endpoint = from, Route = new RoutedTransport(socket, from) };
                     connection.Peer = new NetPeer(connection.Route);
+                    connection.Peer.TimeoutMs = PeerTimeoutMs;
                     Connection captured = connection;
                     connection.Peer.Disconnected += delegate(string reason) { Disconnected(captured); };
                     connection.Peer.Listen(); peers.Add(from, connection);
@@ -307,7 +428,7 @@ namespace OriCoop.CServer
                 Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; quitting = true; };
                 server = new CServer(new ArbiterOptions(), log);
                 server.Start(port);
-                while (!quitting) { server.Step(); Thread.Sleep(1); }
+                server.Run(delegate { return quitting; });
                 return 0;
             }
             catch (Exception ex) { Console.Error.WriteLine("C-server failed: " + ex.Message); return 1; }

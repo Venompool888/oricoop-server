@@ -566,6 +566,61 @@ namespace OriCoop.CServer
             Check("gap_generation_key_independent", GapEvents(arb.Handle(s1, GapAction(30002, Arbiter.FlagClaim, "p:g#2"), 3), 3) == 1);
         }
 
+        // T-162: a link that fails one way (the client's packets are lost while it still hears the server). The server
+        // times the connection out; once the link is back, the client's data is answered with a Goodbye, so it drops
+        // the dead session at once and can rejoin, instead of waiting for its own 10 s receive timeout.
+        static void StaleSessionTests()
+        {
+            server.PeerTimeoutMs = 400;
+            Client oneWay = Join(0, "", null);
+            server.PeerTimeoutMs = 10000;
+            Client watcher = Join(1, oneWay.Welcome.Code, null);
+            byte seat = (byte)oneWay.Welcome.AssignedSeat;
+            Check("stale_setup_two_seats", Until(delegate { return Online(watcher, seat, true, 2); }, 700));
+            long goodbyes = server.StaleGoodbyes;
+            oneWay.Peer.Sim.LossPercent = 100;
+            bool serverDropped = Until(delegate { return Online(watcher, seat, false, 2); }, 1500);
+            RunFor(300);
+            bool stillConnected = oneWay.Peer.State == PeerState.Connected;
+            oneWay.Peer.Sim.LossPercent = 0;
+            double clear = clock.Elapsed.TotalMilliseconds;
+            bool dropped = Until(delegate
+            {
+                oneWay.Send(new byte[] { 1, 4, 1 }, false);
+                return oneWay.Peer.State == PeerState.Disconnected;
+            }, 1500);
+            double after = clock.Elapsed.TotalMilliseconds - clear;
+            // The reason equals the client's own timeout's, so "< 1000 ms" (its own timeout is 10 s) and the server's count
+            // tell the two apart.
+            Check("stale_session_goodbye_after_one_way_link (" + (int)after + " ms)", serverDropped && stillConnected && dropped &&
+                after < 1000 && oneWay.Peer.DisconnectReason == CServer.StaleReason && server.StaleGoodbyes > goodbyes);
+            // The reply never outweighs its request: the Goodbye is smaller than the smallest Data packet (an empty
+            // keepalive, 19 bytes), so the server cannot be used to amplify traffic toward a spoofed address.
+            byte[] keepalive = new byte[19]; keepalive[0] = 0x43; keepalive[1] = 0x4F; keepalive[2] = 4; keepalive[3] = 9;
+            byte[] reply = CServer.StaleSessionGoodbye(keepalive, keepalive.Length, CServer.StaleReason);
+            Check("stale_goodbye_smaller_than_any_data (" + (reply == null ? -1 : reply.Length) + " bytes)",
+                reply != null && reply.Length < keepalive.Length);
+            // A socket the server never knew: only a Data packet with a session id is answered (not a Goodbye, not
+            // session 0, not a short packet), so nothing else can make the server talk to an unknown endpoint.
+            using (UdpTransport raw = new UdpTransport(0))
+            {
+                IPEndPoint to = new IPEndPoint(IPAddress.Loopback, server.LocalPort);
+                long before = server.StaleGoodbyes;
+                byte[] goodbye = { 0x43, 0x4F, 5, 1, 0, 0, 0, 0, 0 };
+                byte[] sessionZero = new byte[19]; sessionZero[0] = 0x43; sessionZero[1] = 0x4F; sessionZero[2] = 4;
+                byte[] shortData = { 0x43, 0x4F, 4, 1, 0, 0, 0, 0, 0 };
+                raw.SendTo(goodbye, 0, goodbye.Length, to);
+                raw.SendTo(sessionZero, 0, sessionZero.Length, to);
+                raw.SendTo(shortData, 0, shortData.Length, to);
+                RunFor(100);
+                bool ignored = server.StaleGoodbyes == before;
+                byte[] data = (byte[])sessionZero.Clone(); data[3] = 7;
+                for (int i = 0; i < 5; i++) raw.SendTo(data, 0, data.Length, to);
+                RunFor(100);
+                Check("stale_goodbye_only_for_data_throttled", ignored && server.StaleGoodbyes == before + 1);
+            }
+        }
+
         // Black-box checks against a deployed server (default options, real network): no server internals,
         // no timing that depends on the test-only short holds.
         static void RemoteTests()
@@ -650,6 +705,65 @@ namespace OriCoop.CServer
             RunFor(100);
         }
 
+        // T-167: with nobody connected, the server's own loop must sleep, not spin. It used to wake about 1000 times
+        // a second (Sleep(1) after each Step, each one a non-blocking receive that threw WouldBlock): about 10% of a
+        // core on a 2-vCPU VM. Oracle from the ticket: idle wake-ups at most 20 per second (one every 50 ms is the
+        // shortest idle wait) and the process at most 5% of one core; a datagram still wakes the loop at once.
+        static volatile bool idleStop;
+        static void IdleTests()
+        {
+            CServer idle = new CServer(new ArbiterOptions());
+            idle.Start(0);
+            idleStop = false;
+            Thread loop = new Thread(delegate() { idle.Run(delegate { return idleStop; }); });
+            loop.IsBackground = true; loop.Start();
+            Client c = null;
+            try
+            {
+                Thread.Sleep(300);
+                Process self = Process.GetCurrentProcess();
+                long steps0 = idle.Steps; TimeSpan cpu0 = self.TotalProcessorTime;
+                Stopwatch watch = Stopwatch.StartNew();
+                Thread.Sleep(2000);
+                self.Refresh();
+                double seconds = watch.Elapsed.TotalSeconds;
+                double wakesPerSecond = (idle.Steps - steps0) / seconds;
+                double cpuShare = (self.TotalProcessorTime - cpu0).TotalSeconds / seconds;
+                Console.WriteLine("  idle: " + wakesPerSecond.ToString("0.0") + " wake-ups/s, " +
+                    (cpuShare * 100).ToString("0.0") + "% of one core");
+                Check("idle_loop_wakeups_at_most_20_per_s", wakesPerSecond <= 20);
+                Check("idle_loop_cpu_at_most_5_percent", cpuShare <= 0.05);
+
+                // Waking on data: from an empty server (250 ms idle wait), each handshake must finish within 100 ms.
+                // A loop that only slept would add a random 0-250 ms per sample; five samples at random phases all
+                // under 100 ms by luck is about 1% (0.4^5). Each client says Goodbye, so the server is empty again.
+                Random phase = new Random();
+                long slowest = 0; bool allConnected = true;
+                for (int i = 0; i < 5; i++)
+                {
+                    Thread.Sleep(300 + phase.Next(250));
+                    c = new Client(new IPEndPoint(IPAddress.Loopback, idle.LocalPort));
+                    Stopwatch handshake = Stopwatch.StartNew();
+                    while (c.Peer.State != PeerState.Connected && handshake.ElapsedMilliseconds < 1000)
+                    {
+                        c.Poll(); Thread.Sleep(1);
+                    }
+                    allConnected &= c.Peer.State == PeerState.Connected;
+                    slowest = Math.Max(slowest, handshake.ElapsedMilliseconds);
+                    c.Peer.Disconnect("sample done"); c.Dispose(); c = null;
+                }
+                Console.WriteLine("  idle: slowest of 5 handshakes " + slowest + " ms");
+                Check("idle_loop_wakes_on_datagram", allConnected && slowest < 100);
+            }
+            finally
+            {
+                idleStop = true;
+                loop.Join(2000);
+                idle.Stop();
+                if (c != null) c.Dispose();
+            }
+        }
+
         public static int Main(string[] args)
         {
             for (int i = 0; i + 1 < args.Length; i += 2)
@@ -677,7 +791,9 @@ namespace OriCoop.CServer
                         MinHoldMs = 500, RoomIdleMs = 1500 });
                     server.Start(0);
                     UdpTests();
+                    StaleSessionTests();
                     MultiSeatTests();
+                    IdleTests();
                 }
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }
