@@ -12,7 +12,7 @@
 | Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
 | Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
 | Matching client / 对应客户端 | OriCoop release **v0.2.2-2026.11.21** (the same tag in the client repo; client protocol net9). 对应 OriCoop 发布版 **v0.2.2-2026.11.21**（客户端仓库同一个标签；客户端协议 net9） |
-| Logs / 日志 | Connection log with each player's IP, SteamID and nickname (T-170), see [Privacy](#privacy) below. 连接日志记录每个玩家的 IP、SteamID 和昵称（T-170） |
+| Logs / 日志 | Opt-in connection log with each player's IP, SteamID and nickname, see [Privacy](#privacy). 连接日志默认关闭，开启后记录玩家的 IP、SteamID 和昵称 |
 | Players per room / 每房人数 | 1-4 |
 | Default port / 默认端口 | **UDP 47022** |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |
@@ -71,14 +71,19 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
 
 ### Privacy
 
-- **Connection log:** the server writes one line per connection event (connect, join with seats, refused join and
+- **Connection logging is off by default.** Enable it with `--log-connections` or set
+  `ORICOOP_CSERVER_LOG_CONNECTIONS=true` in the environment (for systemd, in `/etc/oricoop-cserver.env`; for Docker, pass
+  `-e ORICOOP_CSERVER_LOG_CONNECTIONS=true`). The variable accepts `true`/`false` and `1`/`0`. The flags
+  `--log-connections` and `--no-log-connections` override the variable.
+  These options apply to builds from this source. The published `v0.2.2-2026.11.21` package always logs connections.
+- **When enabled,** the server writes one line per connection event (connect, join with seats, refused join and
   why, token rejoin, leave, timeout, goodbye to a stale session: at most one line per endpoint per minute, with `count=N`) with the time (UTC), the player's **IP address and
-  port, room code, seats, SteamID64(s) and nickname(s)**. The line always goes to stdout (journald / `docker logs`)
+  port, room code, seats, SteamID64(s) and nickname(s)** when available. The line goes to stdout (journald / `docker logs`)
   and, when a log folder is set, is appended to `connections.log` there. Nicknames are escaped (quotes, newlines and
   other control characters), so one line is always one event. Example:
   `2026-11-21T09:11:38.893Z join ip=203.0.113.7:55376 room=725822 seats=2 steam=76561190000000001 nick="Alpha" reason=-`
-- **Tell your players** that your server logs their IP address and SteamID (and nickname), and how long you keep the
-  logs. `deploy/oricoop-cserver.logrotate` keeps about six months (weekly, 26 files, compressed).
+- **If you enable connection logging, tell your players** that you log their IP address, SteamID and nickname,
+  and how long you keep the logs. `deploy/oricoop-cserver.logrotate` keeps about six months (weekly, 26 files, compressed).
 - SteamIDs and nicknames are also shared with the other players in the same room (roster).
 - The optional per-room event log has one line per accepted event: `id from seq kind keyBase64 dataBase64`, with no
   IP addresses, SteamIDs or names.
@@ -129,10 +134,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 隐私
 
-- **连接日志**：每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别：每个端点每分钟最多一行，带 `count=N`）写一行，
-  内容是时间（UTC）、玩家的 **IP 和端口、房间码、座位、SteamID64、昵称**。这一行总是写到标准输出（journald / `docker logs`），
+- **连接日志默认关闭。** 用启动参数 `--log-connections` 或环境变量 `ORICOOP_CSERVER_LOG_CONNECTIONS=true` 开启。
+  systemd 可在 `/etc/oricoop-cserver.env` 中设置，Docker 可传入 `-e ORICOOP_CSERVER_LOG_CONNECTIONS=true`。
+  环境变量接受 `true`/`false` 或 `1`/`0`。`--log-connections` 和 `--no-log-connections` 的优先级高于环境变量。
+  这些选项适用于从此源码构建的版本。已发布的 `v0.2.2-2026.11.21` 安装包始终记录连接日志。
+- **开启后**，每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别：每个端点每分钟最多一行，带 `count=N`）写一行，
+  内容是时间（UTC）以及事件发生时可用的 **玩家 IP 和端口、房间码、座位、SteamID64、昵称**。这一行写到标准输出（journald / `docker logs`），
   设置了日志目录时还追加到该目录的 `connections.log`。昵称会转义（引号、换行和其他控制字符），一行永远是一个事件。
-- **请告知玩家**：你的服务器会记录他们的 IP 地址和 SteamID（以及昵称），并说明保留多久。`deploy/oricoop-cserver.logrotate`
+- **如果开启连接日志，请告知玩家**服务器会记录他们的 IP 地址、SteamID 和昵称，并说明保留多久。`deploy/oricoop-cserver.logrotate`
   约保留半年（每周轮换、保留 26 份、压缩）。
 - SteamID 和昵称也会告诉同一房间的其他玩家（名单）。
 - 可选的按房间事件日志每行一个已接受的事件：`id from seq kind keyBase64 dataBase64`，不含 IP、SteamID 或昵称。

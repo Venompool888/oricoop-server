@@ -623,7 +623,7 @@ namespace OriCoop.CServer
             }
         }
 
-        // T-170: the connection audit log. A server with a log directory appends one line per event to
+        // T-170: with connection logging enabled, a server with a log directory appends one line per event to
         // connections.log (and the same line to stdout): time, event, remote IP:port, room, seats, SteamIDs, nicks,
         // reason. A nick is player text: a newline in it must stay escaped inside its own line.
         static string[] ReadShared(string path)
@@ -652,13 +652,39 @@ namespace OriCoop.CServer
             return null;
         }
 
+        static void AuditDisabledTests()
+        {
+            CServer main = server;
+            string dir = Path.Combine(Path.GetTempPath(), "oricoop-audit-off-" + Guid.NewGuid().ToString("N"));
+            List<string> stdout = new List<string>();
+            server = new CServer(new ArbiterOptions(), dir);
+            server.AuditSink = stdout.Add;
+            try
+            {
+                server.Start(0);
+                Client player = Join(0, "", null);
+                server.Stop();
+
+                Check("audit_disabled_stdout_after_successful_join", player.Welcome.Result == 0 && stdout.Count == 0);
+                Check("audit_disabled_file_with_room_log_directory",
+                    File.Exists(Path.Combine(dir, player.Welcome.Code + ".log")) &&
+                    !File.Exists(Path.Combine(dir, CServer.ConnectionsLogName)));
+            }
+            finally
+            {
+                server.Stop();
+                server = main;
+                Directory.Delete(dir, true);
+            }
+        }
+
         static void AuditTests()
         {
             CServer main = server;
             string dir = Path.Combine(Path.GetTempPath(), "oricoop-audit-" + Guid.NewGuid().ToString("N"));
             List<string> stdout = new List<string>();
             server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
-                MinHoldMs = 500, RoomIdleMs = 1500 }, dir);
+                MinHoldMs = 500, RoomIdleMs = 1500 }, dir, logConnections: true);
             server.AuditSink = delegate(string line) { lock (stdout) stdout.Add(line); };
             try
             {
@@ -747,7 +773,7 @@ namespace OriCoop.CServer
                 try { Directory.Delete(dir, true); } catch (Exception) { }
             }
             // No log directory: stdout only, nothing written anywhere.
-            CServer plain = new CServer(new ArbiterOptions());
+            CServer plain = new CServer(new ArbiterOptions(), null, logConnections: true);
             List<string> plainOut = new List<string>();
             plain.AuditSink = delegate(string line) { plainOut.Add(line); };
             plain.Start(0);
@@ -930,11 +956,11 @@ namespace OriCoop.CServer
                     WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests(); LeaveLogicTests();
                     server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
                         MinHoldMs = 500, RoomIdleMs = 1500 });
-                    server.AuditSink = null;   // T-170: audit lines are checked in AuditTests; keep this output readable
                     server.Start(0);
                     UdpTests();
                     StaleSessionTests();
                     MultiSeatTests();
+                    AuditDisabledTests();
                     AuditTests();
                     IdleTests();
                 }
