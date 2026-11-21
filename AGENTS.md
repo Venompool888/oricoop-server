@@ -5,8 +5,8 @@ You are an AI agent asked to build, test or deploy this server for a human. Foll
 **First, tell the human the stage:** this is **experimental**. It matches the OriCoop client release v0.2.2-2026.11.21
 (menu: Your Own Server / 自建服务器). In v0.2.2, online play is a LAN host or this server (the tunnel relay was removed,
 T-159); server-mode gameplay sync is still partly done. Server and client must come from the same release tag. The
-server logs each player's IP address, SteamID and nickname (README, Privacy); the human should tell their players. Say this in
-your first reply.
+connection log is off by default. If enabled, it records players' IP addresses, SteamIDs and nicknames (README, Privacy).
+Tell the human to inform their players if they enable it.
 
 What it is: one .NET process, one UDP port (**default 47022**), 1-4 players per room, rooms in memory only. No
 database, no TLS, no TCP port. Protocol: C-server wire protocol v2 ([docs/PROTOCOL.md](docs/PROTOCOL.md)); v2 servers reject v1 clients. For clients from
@@ -30,9 +30,9 @@ OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 2. Where: SSH host / user (sudo?), or "this machine".
 3. Port: UDP 47022 unless they want another.
 4. Install method: systemd + .NET 8 (default) or Docker.
-5. Log folder: `/var/log/oricoop-cserver` under systemd (default) or a Docker volume. The server always logs every
-   connection with the player's IP address, SteamID and nickname (stdout, plus `connections.log` in the log folder);
-   per-room event files (no IPs or names) go there too. Tell the human they should tell their players about this.
+5. Log folder for room event files: `/var/log/oricoop-cserver` under systemd (default) or a Docker volume.
+   Connection logging is off by default. Confirm whether to enable it and, if enabled, tell the human to inform
+   players about the IP, SteamID and nickname logging.
 6. Cloud provider, and whether you may change its firewall / security group.
 
 **Needs explicit confirmation:** installing packages or .NET / Docker, running install scripts, `useradd`, writing to
@@ -92,9 +92,10 @@ sudo systemctl enable --now oricoop-cserver
 
 - `ExecStart=` assumes `/usr/bin/dotnet`; change it for a dotnet-install.sh install.
 - Port: `ORICOOP_CSERVER_PORT` in `/etc/oricoop-cserver.env` (or `--port` in `ExecStart`, which wins).
-- Logs: `LogsDirectory=oricoop-cserver` creates `/var/log/oricoop-cserver`; the server uses it through
-  `LOGS_DIRECTORY` automatically and appends `connections.log` (one line per connection event: IP:port, room, seats,
-  SteamIDs, nicknames) plus one event file per room. Files are append-only; rotation (ask the human first):
+- `LogsDirectory=oricoop-cserver` provides `/var/log/oricoop-cserver` through `LOGS_DIRECTORY` for room event files.
+- To enable connection logging, set `ORICOOP_CSERVER_LOG_CONNECTIONS=true` in `/etc/oricoop-cserver.env` or pass
+  `--log-connections` in `ExecStart`. When enabled, connection events go to stdout and append to `connections.log`
+  in the log directory. For rotation, ask the human first, then run
   `sudo install -m 644 deploy/oricoop-cserver.logrotate /etc/logrotate.d/oricoop-cserver` (weekly, keeps 26,
   compressed; check with `sudo logrotate -d /etc/logrotate.d/oricoop-cserver`).
 - Overrides: `sudo systemctl edit oricoop-cserver` (drop-in) instead of editing the unit. systemd does not allow
@@ -166,7 +167,8 @@ docker run -d --name oricoop-cserver --restart unless-stopped -p 47022:47022/udp
 docker logs oricoop-cserver
 ```
 `/udp` in `-p` matters. For another port, change the mapping and add `--port <port>` after the image name (the image's
-default `CMD` sets `--port 47022`, which overrides `ORICOOP_CSERVER_PORT`).
+default `CMD` sets `--port 47022`, which overrides `ORICOOP_CSERVER_PORT`). To enable connection logging, set
+`-e ORICOOP_CSERVER_LOG_CONNECTIONS=true` before the image name.
 
 Windows:
 ```powershell
@@ -174,7 +176,8 @@ Windows:
 .\server\CServer.exe --port 47022 --log .\logs   # Ctrl+C stops it
 New-NetFirewallRule -DisplayName 'OriCoop C-server' -Direction Inbound -Protocol UDP -LocalPort 47022 -Action Allow   # admin, confirm first
 ```
-A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CGNAT).
+Add `--log-connections` to enable connection logging. A home PC also needs router port forwarding (UDP 47022)
+and a public IPv4 (no CGNAT).
 
 ## 9. Common mistakes
 
@@ -191,6 +194,5 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 ## 10. Report back to the human
 
 Address and port (`host:47022`), install method and paths, firewall changes made and any left for them, service status
-and the listening line, where the logs are (and that they hold players' IPs and SteamIDs, which the players should
-be told), how to upgrade / roll back, and which client release
-(v0.2.2-2026.11.21) players need.
+and the listening line, where the logs are, whether connection logging is enabled, how to upgrade / roll back, and
+which client release (v0.2.2-2026.11.21) players need.

@@ -122,6 +122,7 @@ namespace OriCoop.CServer
         readonly Stopwatch clock = new Stopwatch();
         readonly ArbiterOptions options;
         readonly string logDirectory;
+        readonly bool logConnections;
         // T-162: when each dropped endpoint was last told its session is gone (at most one Goodbye per 250 ms each).
         readonly Dictionary<EndPoint, double> staleReplies = new Dictionary<EndPoint, double>();
         ServerSocket socket;
@@ -130,18 +131,20 @@ namespace OriCoop.CServer
         public int PeerTimeoutMs = 10000;
         public long StaleGoodbyes { get; private set; }
 
-        // T-170: connection audit log. One line per event (connect, join, refusal, rejoin, leave, timeout, stale
-        // goodbye) with the remote IP:port, room, seats, SteamIDs and nicks; appended to <log dir>/connections.log
-        // (flushed per line) and written to stdout for journald. Without a log directory: stdout only.
+        // T-170: opt-in connection audit log. When enabled, each event goes to stdout and, with a log directory,
+        // to connections.log. It includes the remote IP:port, room, seats, SteamIDs and nicks when available.
         public const string ConnectionsLogName = "connections.log";
         public Action<string> AuditSink = Console.WriteLine;
         string auditPath;
 
         public CServer() : this(new ArbiterOptions(), null) { }
         public CServer(ArbiterOptions options) : this(options, null) { }
-        public CServer(ArbiterOptions options, string logDirectory)
+        public CServer(ArbiterOptions options, string logDirectory) : this(options, logDirectory, false) { }
+        public CServer(ArbiterOptions options, string logDirectory, bool logConnections)
         {
-            this.options = options; this.logDirectory = logDirectory;
+            this.options = options;
+            this.logDirectory = logDirectory;
+            this.logConnections = logConnections;
         }
         public int LocalPort { get { return socket.LocalPort; } }
         public long DroppedSenders { get; private set; }
@@ -160,7 +163,7 @@ namespace OriCoop.CServer
             if (logDirectory != null)
             {
                 Directory.CreateDirectory(logDirectory);
-                auditPath = Path.Combine(logDirectory, ConnectionsLogName);
+                if (logConnections) auditPath = Path.Combine(logDirectory, ConnectionsLogName);
             }
             socket = new ServerSocket(port); clock.Start();
             Console.WriteLine("OriCoop C-server listening on UDP port " + LocalPort);
@@ -226,6 +229,7 @@ namespace OriCoop.CServer
         readonly Dictionary<EndPoint, StaleAudit> staleAudits = new Dictionary<EndPoint, StaleAudit>();
         void AuditStale(EndPoint from, double nowMs)
         {
+            if (!logConnections) return;
             StaleAudit entry;
             if (staleAudits.TryGetValue(from, out entry))
             {
@@ -322,6 +326,7 @@ namespace OriCoop.CServer
         void Audit(string evt, EndPoint endpoint, string room, string seats, string steam, string nick, string reason,
             string extra)
         {
+            if (!logConnections) return;
             string line = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture) +
                 " " + evt + " ip=" + AuditEndpoint(endpoint) + " room=" + (String.IsNullOrEmpty(room) ? "-" : room) +
                 " seats=" + (String.IsNullOrEmpty(seats) ? "-" : seats) +
@@ -350,7 +355,7 @@ namespace OriCoop.CServer
 
         void AuditEnd(Connection connection, string reason)
         {
-            if (connection.AuditEnded) return;
+            if (!logConnections || connection.AuditEnded) return;
             connection.AuditEnded = true;
             Audit(reason == "timed out" ? "timeout" : "leave", connection.Endpoint, connection.AuditRoom,
                 connection.AuditSeats, connection.AuditSteam, connection.AuditNick, reason);
@@ -399,8 +404,8 @@ namespace OriCoop.CServer
                 rooms.Add(code, room);
             }
             else if (!rooms.TryGetValue(request.Code, out room)) failure = 1;
-            string steam, nick;
-            AuditIdentities(request, out steam, out nick);
+            string steam = null, nick = null;
+            if (logConnections) AuditIdentities(request, out steam, out nick);
             if (failure != 0)
             {
                 Audit(request.Mode == 2 ? "rejoin_refused" : "join_refused", connection.Endpoint, request.Code, null,
@@ -411,7 +416,7 @@ namespace OriCoop.CServer
             int seat; byte[] welcome;
             List<Outgoing> output = room.Arbiter.Join(request, nowMs, out seat, out welcome);
             Send(connection, welcome, true);
-            if (seat == 0)
+            if (logConnections && seat == 0)
                 Audit(request.Mode == 2 ? "rejoin_refused" : "join_refused", connection.Endpoint, room.Code, null,
                     steam, nick, RefusalReason(CsWire.Decode(welcome).Result));
             if (seat != 0)
@@ -425,10 +430,13 @@ namespace OriCoop.CServer
                 }
                 connection.Room = room; connection.Seats = room.Arbiter.ConnectionSeats(seat);
                 room.Members.Add(connection);
-                connection.AuditRoom = room.Code; connection.AuditSeats = AuditSeatList(connection.Seats);
-                connection.AuditSteam = steam; connection.AuditNick = nick;
-                Audit(request.Mode == 0 ? "create" : request.Mode == 2 ? "rejoin" : "join", connection.Endpoint,
-                    room.Code, connection.AuditSeats, steam, nick, null);
+                if (logConnections)
+                {
+                    connection.AuditRoom = room.Code; connection.AuditSeats = AuditSeatList(connection.Seats);
+                    connection.AuditSteam = steam; connection.AuditNick = nick;
+                    Audit(request.Mode == 0 ? "create" : request.Mode == 2 ? "rejoin" : "join", connection.Endpoint,
+                        room.Code, connection.AuditSeats, steam, nick, null);
+                }
             }
             Dispatch(room, output, true);
         }
@@ -574,6 +582,17 @@ namespace OriCoop.CServer
             clock.Reset();
         }
 
+        static bool ConnectionLoggingFromEnvironment()
+        {
+            string value = (Environment.GetEnvironmentVariable("ORICOOP_CSERVER_LOG_CONNECTIONS") ?? "").Trim();
+            if (value.Length == 0 || value == "0") return false;
+            if (value == "1") return true;
+
+            bool enabled;
+            if (Boolean.TryParse(value, out enabled)) return enabled;
+            throw new ArgumentException("ORICOOP_CSERVER_LOG_CONNECTIONS must be true, false, 1 or 0");
+        }
+
         public static int Main(string[] args)
         {
             CServer server = null;
@@ -584,15 +603,19 @@ namespace OriCoop.CServer
                 string log = Environment.GetEnvironmentVariable("ORICOOP_CSERVER_LOG_DIR");
                 if (String.IsNullOrEmpty(log)) log = Environment.GetEnvironmentVariable("LOGS_DIRECTORY");
                 if (String.IsNullOrEmpty(log)) log = null;
+                bool? logConnections = null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     if (args[i] == "--port") port = Int32.Parse(args[++i]);
                     else if (args[i] == "--log") log = args[++i];
-                    else throw new ArgumentException("usage: CServer [--port 47022] [--log directory]");
+                    else if (args[i] == "--log-connections") logConnections = true;
+                    else if (args[i] == "--no-log-connections") logConnections = false;
+                    else throw new ArgumentException(
+                        "usage: CServer [--port 47022] [--log directory] [--log-connections|--no-log-connections]");
                 }
                 quitting = false;
                 Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; quitting = true; };
-                server = new CServer(new ArbiterOptions(), log);
+                server = new CServer(new ArbiterOptions(), log, logConnections ?? ConnectionLoggingFromEnvironment());
                 server.Start(port);
                 server.Run(delegate { return quitting; });
                 return 0;
