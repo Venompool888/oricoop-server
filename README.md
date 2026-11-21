@@ -73,10 +73,17 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
 
 ### Privacy
 
-- Clients send a SteamID64 and a nickname in `CsJoin`. The server keeps them **in memory only** and shares them with
-  the other players in the same room (roster). They are not written to disk.
-- The optional per-room event log has one line per accepted event: `id from seq kind keyBase64 dataBase64`. It
-  contains **no IP addresses, SteamIDs or names**. Rotate or delete it yourself.
+- **Connection log:** the server writes one line per connection event (connect, join with seats, refused join and
+  why, token rejoin, leave, timeout, goodbye to a stale session) with the time (UTC), the player's **IP address and
+  port, room code, seats, SteamID64(s) and nickname(s)**. The line always goes to stdout (journald / `docker logs`)
+  and, when a log folder is set, is appended to `connections.log` there. Nicknames are escaped (quotes, newlines and
+  other control characters), so one line is always one event. Example:
+  `2026-11-21T09:11:38.893Z join ip=203.0.113.7:55376 room=725822 seats=2 steam=76561190000000001 nick="Alpha" reason=-`
+- **Tell your players** that your server logs their IP address and SteamID (and nickname), and how long you keep the
+  logs. `deploy/oricoop-cserver.logrotate` keeps about six months (weekly, 26 files, compressed).
+- SteamIDs and nicknames are also shared with the other players in the same room (roster).
+- The optional per-room event log has one line per accepted event: `id from seq kind keyBase64 dataBase64`, with no
+  IP addresses, SteamIDs or names.
 
 ### Layout
 
@@ -86,7 +93,7 @@ shared/   pure C# 5 files also compiled into the mod: Arbiter.cs, CsWire.cs (ser
           AuthorityClient.cs, HostArbiter.cs, INetRouteServer.cs, CServerClient.cs (client side);
           net/ (copies of the mod's NetPeer.cs, Transport.cs)
 tests/    CServerTest.cs (67 + 12 --host checks), AuthorityTest.cs (31), CServerClientTest.cs (32)
-deploy/   oricoop-cserver.service, oricoop-cserver.env.example
+deploy/   oricoop-cserver.service, oricoop-cserver.env.example, oricoop-cserver.logrotate
 docs/     PROTOCOL.md
 ```
 
@@ -124,8 +131,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 隐私
 
-- 客户端在 `CsJoin` 里发送 SteamID64 和昵称。服务器**只放在内存里**，并告诉同一房间的其他玩家（名单），不写到磁盘。
-- 可选的按房间事件日志每行一个已接受的事件：`id from seq kind keyBase64 dataBase64`，**不含 IP、SteamID 或昵称**。日志请自己轮换或删除。
+- **连接日志**：每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别）写一行，
+  内容是时间（UTC）、玩家的 **IP 和端口、房间码、座位、SteamID64、昵称**。这一行总是写到标准输出（journald / `docker logs`），
+  设置了日志目录时还追加到该目录的 `connections.log`。昵称会转义（引号、换行和其他控制字符），一行永远是一个事件。
+- **请告知玩家**：你的服务器会记录他们的 IP 地址和 SteamID（以及昵称），并说明保留多久。`deploy/oricoop-cserver.logrotate`
+  约保留半年（每周轮换、保留 26 份、压缩）。
+- SteamID 和昵称也会告诉同一房间的其他玩家（名单）。
+- 可选的按房间事件日志每行一个已接受的事件：`id from seq kind keyBase64 dataBase64`，不含 IP、SteamID 或昵称。
 
 ### 协议和版本
 
