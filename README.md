@@ -74,7 +74,7 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
 ### Privacy
 
 - **Connection log:** the server writes one line per connection event (connect, join with seats, refused join and
-  why, token rejoin, leave, timeout, goodbye to a stale session) with the time (UTC), the player's **IP address and
+  why, token rejoin, leave, timeout, goodbye to a stale session: at most one line per endpoint per minute, with `count=N`) with the time (UTC), the player's **IP address and
   port, room code, seats, SteamID64(s) and nickname(s)**. The line always goes to stdout (journald / `docker logs`)
   and, when a log folder is set, is appended to `connections.log` there. Nicknames are escaped (quotes, newlines and
   other control characters), so one line is always one event. Example:
@@ -131,7 +131,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 隐私
 
-- **连接日志**：每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别）写一行，
+- **连接日志**：每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别：每个端点每分钟最多一行，带 `count=N`）写一行，
   内容是时间（UTC）、玩家的 **IP 和端口、房间码、座位、SteamID64、昵称**。这一行总是写到标准输出（journald / `docker logs`），
   设置了日志目录时还追加到该目录的 `connections.log`。昵称会转义（引号、换行和其他控制字符），一行永远是一个事件。
 - **请告知玩家**：你的服务器会记录他们的 IP 地址和 SteamID（以及昵称），并说明保留多久。`deploy/oricoop-cserver.logrotate`
