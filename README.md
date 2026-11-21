@@ -1,23 +1,20 @@
 # OriCoop Server (C-server)
 
-> **Experimental.** The OriCoop client release **v0.2.1-2026.11.18** can connect to this server (menu: Server → 服务器（平等模式）),
-> but server mode is still being built: some world and enemy sync still follows the host. For the most tested way to
-> play online with v0.2.1, use the tunnel relay [oricoop-relay](https://github.com/Venompool888/oricoop-relay) (same release tag).
-> The relay is removed from OriCoop after v0.2.1 (T-159): from the next release, online play is LAN host mode or this server.
+> **Experimental.** Matches OriCoop client release **v0.2.2-2026.11.21** (menu: Your Own Server / 自建服务器). Online play
+> in OriCoop v0.2.2 is a LAN host or this server; the tunnel relay is gone (T-159). Server-mode gameplay sync is still
+> being built. The release ships a linux-x64 package with this server and the room save service (TCP 47021).
 >
-> **实验阶段。** OriCoop 客户端发布版 **v0.2.1-2026.11.18** 可以连接这个服务器（菜单：服务器 → 服务器（平等模式）），
-> 但服务器模式还在开发中，部分世界和敌人同步仍以主机为准。v0.2.1 最稳定的联机方式仍是隧道中继
-> [oricoop-relay](https://github.com/Venompool888/oricoop-relay)（同一个发布标签）。v0.2.1 之后 OriCoop 移除了中继（T-159）：下一个发布版起，联机方式是局域网主机模式或本服务器。
+> **实验阶段。** 对应 OriCoop 客户端发布版 **v0.2.2-2026.11.21**（菜单：自建服务器）。v0.2.2 的联机方式是局域网主机或本服务器，
+> 隧道中继已移除（T-159）。服务器模式的玩法同步仍在完善中。同名发布附带 linux-x64 安装包：本服务器加房间存档服务（TCP 47021）。
 
 | | |
 |---|---|
 | Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
 | Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
-| Matching client / 对应客户端 | OriCoop release **v0.2.1-2026.11.18** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.1-2026.11.18**（客户端仓库和 oricoop-relay 用同一个标签） |
-| Test pre-release / 测试版 | OriCoop **v0.2.2-rc1-2026.11.21** (client protocol net8, same C-server wire protocol v2; no relay). Its release here ships a linux-x64 package with this server and the room save service (TCP 47021), see DEPLOY.md inside. 测试版 OriCoop **v0.2.2-rc1-2026.11.21**（客户端协议 net8，C-server 协议仍是 v2；没有中继）。本仓库同名发布附带 linux-x64 安装包：本服务器加房间存档服务（TCP 47021），部署方法见包内 DEPLOY.md |
-| Server pre-release / 服务器测试版 | **v0.2.2-rc2-2026.11.21**: adds the connection log (IP, SteamID, nickname; T-170) with logrotate configs; same client v0.2.2-rc1 (no client or wire change). rc1 is an interim build without connection logs. **v0.2.2-rc2-2026.11.21**：新增连接日志（IP、SteamID、昵称；T-170）和 logrotate 配置；客户端仍是 v0.2.2-rc1（客户端和协议不变）。rc1 是不带连接日志的临时版本 |
+| Matching client / 对应客户端 | OriCoop release **v0.2.2-2026.11.21** (the same tag in the client repo; client protocol net9). 对应 OriCoop 发布版 **v0.2.2-2026.11.21**（客户端仓库同一个标签；客户端协议 net9） |
+| Logs / 日志 | Connection log with each player's IP, SteamID and nickname (T-170), see [Privacy](#privacy) below. 连接日志记录每个玩家的 IP、SteamID 和昵称（T-170） |
 | Players per room / 每房人数 | 1-4 |
-| Default port / 默认端口 | **UDP 47022** (the v0.2.1 tunnel relay used 47020) |
+| Default port / 默认端口 | **UDP 47022** |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |
 
 **AI agents: read [AGENTS.md](AGENTS.md) first.** / **让 AI 部署：让它先读 [AGENTS.md](AGENTS.md)。**
@@ -142,7 +139,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 协议和版本
 
-当前是 **C-server 线协议 v2**（一台设备可带多个座位，见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），对应 OriCoop 发布版 **v0.2.1-2026.11.18**。
+当前是 **C-server 线协议 v2**（一台设备可带多个座位，见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），对应 OriCoop 发布版 **v0.2.2-2026.11.21**。
 v2 服务器拒绝 v1 客户端；OriCoop v0.2.0-2026.11.17 的客户端请用本仓库的标签 `v0.2.0-2026.11.17` 部署。
 
 许可证：[MIT](LICENSE)。
