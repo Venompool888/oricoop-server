@@ -14,6 +14,7 @@
 | Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
 | Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
 | Matching client / 对应客户端 | OriCoop release **v0.2.1-2026.11.18** (the same tag in the client repo and in oricoop-relay). 对应 OriCoop 发布版 **v0.2.1-2026.11.18**（客户端仓库和 oricoop-relay 用同一个标签） |
+| Test pre-release / 测试版 | OriCoop **v0.2.2-rc1-2026.11.21** (client protocol net8, same C-server wire protocol v2; no relay). Its release here ships a linux-x64 package with this server and the room save service (TCP 47021), see DEPLOY.md inside. 测试版 OriCoop **v0.2.2-rc1-2026.11.21**（客户端协议 net8，C-server 协议仍是 v2；没有中继）。本仓库同名发布附带 linux-x64 安装包：本服务器加房间存档服务（TCP 47021），部署方法见包内 DEPLOY.md |
 | Players per room / 每房人数 | 1-4 |
 | Default port / 默认端口 | **UDP 47022** (the v0.2.1 tunnel relay used 47020) |
 | Runtime / 运行环境 | .NET 8 (Linux, Docker) or .NET Framework 4.x (Windows `.exe`) |
