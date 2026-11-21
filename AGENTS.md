@@ -30,7 +30,9 @@ OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 2. Where: SSH host / user (sudo?), or "this machine".
 3. Port: UDP 47022 unless they want another.
 4. Install method: systemd + .NET 8 (default) or Docker.
-5. Event log: off (default) or on (`/var/log/oricoop-cserver`, one file per room, no IPs or names).
+5. Log folder: `/var/log/oricoop-cserver` under systemd (default) or a Docker volume. The server always logs every
+   connection with the player's IP address, SteamID and nickname (stdout, plus `connections.log` in the log folder);
+   per-room event files (no IPs or names) go there too. Tell the human they should tell their players about this.
 6. Cloud provider, and whether you may change its firewall / security group.
 
 **Needs explicit confirmation:** installing packages or .NET / Docker, running install scripts, `useradd`, writing to
@@ -90,9 +92,11 @@ sudo systemctl enable --now oricoop-cserver
 
 - `ExecStart=` assumes `/usr/bin/dotnet`; change it for a dotnet-install.sh install.
 - Port: `ORICOOP_CSERVER_PORT` in `/etc/oricoop-cserver.env` (or `--port` in `ExecStart`, which wins).
-- Event log: `LogsDirectory=oricoop-cserver` creates `/var/log/oricoop-cserver`; the server uses it through
-  `LOGS_DIRECTORY` automatically. It does not rotate the files; set up logrotate or a cleanup timer if the human
-  wants (ask first).
+- Logs: `LogsDirectory=oricoop-cserver` creates `/var/log/oricoop-cserver`; the server uses it through
+  `LOGS_DIRECTORY` automatically and appends `connections.log` (one line per connection event: IP:port, room, seats,
+  SteamIDs, nicknames) plus one event file per room. Files are append-only; rotation (ask the human first):
+  `sudo install -m 644 deploy/oricoop-cserver.logrotate /etc/logrotate.d/oricoop-cserver` (weekly, keeps 26,
+  compressed; check with `sudo logrotate -d /etc/logrotate.d/oricoop-cserver`).
 - Overrides: `sudo systemctl edit oricoop-cserver` (drop-in) instead of editing the unit. systemd does not allow
   comments at the end of a value line.
 
@@ -187,5 +191,6 @@ A home PC also needs router port forwarding (UDP 47022) and a public IPv4 (no CG
 ## 10. Report back to the human
 
 Address and port (`host:47022`), install method and paths, firewall changes made and any left for them, service status
-and the listening line, whether the event log is on and where, how to upgrade / roll back, and which client release
+and the listening line, where the logs are (and that they hold players' IPs and SteamIDs, which the players should
+be told), how to upgrade / roll back, and which client release
 (v0.2.1-2026.11.18) players need.

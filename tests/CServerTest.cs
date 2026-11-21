@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading;
 using OriCoop.Net;
 using OriCoop.Authority;
@@ -621,6 +623,145 @@ namespace OriCoop.CServer
             }
         }
 
+        // T-170: the connection audit log. A server with a log directory appends one line per event to
+        // connections.log (and the same line to stdout): time, event, remote IP:port, room, seats, SteamIDs, nicks,
+        // reason. A nick is player text: a newline in it must stay escaped inside its own line.
+        static string[] ReadShared(string path)
+        {
+            if (!File.Exists(path)) return new string[0];
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (StreamReader reader = new StreamReader(stream))
+            {
+                List<string> lines = new List<string>();
+                string line;
+                while ((line = reader.ReadLine()) != null) lines.Add(line);
+                return lines.ToArray();
+            }
+        }
+
+        static string FindLine(string[] lines, string evt, params string[] parts)
+        {
+            foreach (string line in lines)
+            {
+                string[] head = line.Split(' ');
+                if (head.Length < 2 || head[1] != evt) continue;
+                bool all = true;
+                foreach (string part in parts) if (line.IndexOf(part, StringComparison.Ordinal) < 0) all = false;
+                if (all) return line;
+            }
+            return null;
+        }
+
+        static void AuditTests()
+        {
+            CServer main = server;
+            string dir = Path.Combine(Path.GetTempPath(), "oricoop-audit-" + Guid.NewGuid().ToString("N"));
+            List<string> stdout = new List<string>();
+            server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
+                MinHoldMs = 500, RoomIdleMs = 1500 }, dir);
+            server.AuditSink = delegate(string line) { lock (stdout) stdout.Add(line); };
+            try
+            {
+                server.Start(0);
+                // Two local players on one connection; the second nick tries to forge a log line.
+                Client a = Connect();
+                CsMessage join = new CsMessage { Type = CsWire.CsJoin, Mode = 0, Code = "", Token = new byte[16], Count = 2 };
+                join.Identities.Add(new CsIdentity { Steam = 76561190000000001UL, Nick = "Alpha" });
+                join.Identities.Add(new CsIdentity { Steam = 76561190000000002UL,
+                    Nick = "Be\"ta\n2026-01-01T00:00:00.000Z leave ip=6.6.6.6:1\t\u0007" });
+                a.Send(join);
+                bool welcomed = Until(delegate { return a.Welcome != null; }, 1200);
+                string code = welcomed ? a.Welcome.Code : "?";
+                byte[] token = welcomed ? a.Welcome.Token : new byte[16];
+                Client refused = Join(1, "000000", null);
+                // Rejoin with the token: replaces connection a (a gets a "replaced" leave line).
+                Client back = Connect();
+                CsMessage rejoin = new CsMessage { Type = CsWire.CsJoin, Mode = 2, Code = code, Token = token, Count = 2 };
+                rejoin.Identities.Add(new CsIdentity { Steam = 76561190000000001UL, Nick = "Alpha" });
+                rejoin.Identities.Add(new CsIdentity { Steam = 76561190000000002UL, Nick = "Beta" });
+                back.Send(rejoin);
+                Until(delegate { return back.Welcome != null; }, 1200);
+                RunFor(50);
+                back.Peer.Disconnect("bye");
+                RunFor(100);
+                // A connection whose packets stop arriving times out on the server.
+                server.PeerTimeoutMs = 300;
+                Client lost = Join(1, code, null);
+                server.PeerTimeoutMs = 10000;
+                lost.Peer.Sim.LossPercent = 100;
+                RunFor(600);
+                lost.Peer.Sim.LossPercent = 0;
+                lost.Send(new byte[] { 1, 2, 1 }, false);
+                RunFor(100);
+                // A dropped client that keeps sending: 20 stale datagrams within 1 s get several goodbyes (one per
+                // 250 ms) but exactly one audit line.
+                int floodPort;
+                long floodGoodbyes = server.StaleGoodbyes;
+                using (UdpTransport flood = new UdpTransport(0))
+                {
+                    floodPort = flood.LocalPort;
+                    IPEndPoint to = new IPEndPoint(IPAddress.Loopback, server.LocalPort);
+                    byte[] data = new byte[19]; data[0] = 0x43; data[1] = 0x4F; data[2] = 4; data[3] = 11;
+                    for (int i = 0; i < 20; i++) { flood.SendTo(data, 0, data.Length, to); RunFor(45); }
+                    RunFor(50);
+                }
+                floodGoodbyes = server.StaleGoodbyes - floodGoodbyes;
+
+                string[] lines = ReadShared(Path.Combine(dir, CServer.ConnectionsLogName));
+                string ipA = "ip=127.0.0.1:" + a.Socket.LocalPort + " ";
+                string created = FindLine(lines, "create", ipA, "room=" + code + " ", "seats=1,2 ",
+                    "steam=76561190000000001,76561190000000002 ", "nick=\"Alpha\",\"Be");
+                Console.WriteLine("  audit: " + (created ?? "(no create line)"));
+                Check("audit_join_line_has_ip_steam_nick", welcomed && created != null);
+                Regex shape = new Regex(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z [a-z_]+ ip=[0-9.]+:\d+ room=\S+ seats=\S+ steam=\S+ nick=.* reason=\S.*$");
+                bool everyLineShaped = lines.Length > 0;
+                foreach (string line in lines) if (!shape.IsMatch(line)) everyLineShaped = false;
+                Check("audit_nick_newline_escaped", created != null &&
+                    created.Contains("\"Be\\\"ta\\n2026-01-01T00:00:00.000Z leave ip=6.6.6.6:1\\t\\u0007\"") &&
+                    Array.FindIndex(lines, delegate(string line) { return line.StartsWith("2026-01-01T", StringComparison.Ordinal); }) < 0 &&
+                    everyLineShaped);
+                Check("audit_connect_refused_rejoin_leave_timeout",
+                    FindLine(lines, "connect", ipA) != null &&
+                    FindLine(lines, "join_refused", "ip=127.0.0.1:" + refused.Socket.LocalPort + " ", "room=000000 ", "reason=\"no_room\"") != null &&
+                    FindLine(lines, "rejoin", "ip=127.0.0.1:" + back.Socket.LocalPort + " ", "room=" + code + " ", "seats=1,2 ", "steam=76561190000000001,76561190000000002 ") != null &&
+                    FindLine(lines, "leave", ipA, "reason=\"replaced\"") != null &&
+                    FindLine(lines, "leave", "ip=127.0.0.1:" + back.Socket.LocalPort + " ", "steam=76561190000000001,", "reason=\"bye\"") != null &&
+                    FindLine(lines, "timeout", "ip=127.0.0.1:" + lost.Socket.LocalPort + " ", "room=" + code + " ", "reason=\"timed out\"") != null &&
+                    FindLine(lines, "stale_goodbye", "ip=127.0.0.1:" + lost.Socket.LocalPort + " ") != null);
+                int floodLines = 0;
+                foreach (string line in lines)
+                    if (line.Contains(" stale_goodbye ip=127.0.0.1:" + floodPort + " ")) floodLines++;
+                string floodLine = FindLine(lines, "stale_goodbye", "ip=127.0.0.1:" + floodPort + " ", "reason=\"timed out\" count=1");
+                Check("audit_stale_goodbye_rate_limited (" + floodGoodbyes + " goodbyes, " + floodLines + " lines)",
+                    floodGoodbyes >= 2 && floodLines == 1 && floodLine != null);
+                bool same;
+                lock (stdout) same = stdout.Count == lines.Length && String.Join("\n", stdout.ToArray()) == String.Join("\n", lines);
+                Check("audit_stdout_same_lines (" + lines.Length + ")", same);
+                foreach (Client x in new Client[] { a, refused, back, lost }) x.Peer.Disconnect("done");
+                RunFor(50);
+            }
+            finally
+            {
+                server.Stop();
+                server = main;
+                try { Directory.Delete(dir, true); } catch (Exception) { }
+            }
+            // No log directory: stdout only, nothing written anywhere.
+            CServer plain = new CServer(new ArbiterOptions());
+            List<string> plainOut = new List<string>();
+            plain.AuditSink = delegate(string line) { plainOut.Add(line); };
+            plain.Start(0);
+            using (Client c = new Client(new IPEndPoint(IPAddress.Loopback, plain.LocalPort)))
+            {
+                Stopwatch watch = Stopwatch.StartNew();
+                while (c.Peer.State != PeerState.Connected && watch.ElapsedMilliseconds < 1000) { plain.Step(); c.Poll(); Thread.Sleep(1); }
+                plain.Step();
+                Check("audit_without_log_dir_stdout_only", plainOut.Count >= 1 && plainOut[0].Contains(" connect ip=127.0.0.1:" + c.Socket.LocalPort + " "));
+                c.Peer.Disconnect("done"); c.Poll();
+            }
+            plain.Stop();
+        }
+
         // Black-box checks against a deployed server (default options, real network): no server internals,
         // no timing that depends on the test-only short holds.
         static void RemoteTests()
@@ -789,10 +930,12 @@ namespace OriCoop.CServer
                     WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests(); LeaveLogicTests();
                     server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
                         MinHoldMs = 500, RoomIdleMs = 1500 });
+                    server.AuditSink = null;   // T-170: audit lines are checked in AuditTests; keep this output readable
                     server.Start(0);
                     UdpTests();
                     StaleSessionTests();
                     MultiSeatTests();
+                    AuditTests();
                     IdleTests();
                 }
             }

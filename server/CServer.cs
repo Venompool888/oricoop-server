@@ -101,6 +101,9 @@ namespace OriCoop.CServer
             public List<int> Seats = new List<int>();
             public int PrimarySeat { get { return Arbiter.PrimarySeat(Seats); } }
             public double ClosingAt = -1;
+            // T-170: who this connection said it is (from its accepted CsJoin), for the audit lines after it is gone.
+            public string AuditRoom, AuditSeats, AuditSteam, AuditNick;
+            public bool AuditEnded;
         }
 
         sealed class Room
@@ -127,6 +130,13 @@ namespace OriCoop.CServer
         public int PeerTimeoutMs = 10000;
         public long StaleGoodbyes { get; private set; }
 
+        // T-170: connection audit log. One line per event (connect, join, refusal, rejoin, leave, timeout, stale
+        // goodbye) with the remote IP:port, room, seats, SteamIDs and nicks; appended to <log dir>/connections.log
+        // (flushed per line) and written to stdout for journald. Without a log directory: stdout only.
+        public const string ConnectionsLogName = "connections.log";
+        public Action<string> AuditSink = Console.WriteLine;
+        string auditPath;
+
         public CServer() : this(new ArbiterOptions(), null) { }
         public CServer(ArbiterOptions options) : this(options, null) { }
         public CServer(ArbiterOptions options, string logDirectory)
@@ -147,7 +157,11 @@ namespace OriCoop.CServer
 
         public void Start(int port)
         {
-            if (logDirectory != null) Directory.CreateDirectory(logDirectory);
+            if (logDirectory != null)
+            {
+                Directory.CreateDirectory(logDirectory);
+                auditPath = Path.Combine(logDirectory, ConnectionsLogName);
+            }
             socket = new ServerSocket(port); clock.Start();
             Console.WriteLine("OriCoop C-server listening on UDP port " + LocalPort);
         }
@@ -198,6 +212,41 @@ namespace OriCoop.CServer
             staleReplies[from] = nowMs;
             socket.SendTo(goodbye, 0, goodbye.Length, from);
             StaleGoodbyes++;
+            AuditStale(from, nowMs);
+        }
+
+        // T-170: the stale_goodbye audit line is rate limited (the goodbye itself is not): the first per endpoint,
+        // then at most one per endpoint per minute with count= the goodbyes since the previous line, so a client
+        // that keeps sending or spoofed UDP from many sources cannot flood connections.log and the journal.
+        // Tracking is capped like staleReplies: entries older than 10 minutes are pruned at 1024 endpoints, and a
+        // new endpoint is not logged while it stays full. Goodbyes counted after an endpoint's last line and never
+        // followed by another goodbye a minute later are not logged.
+        public const double StaleAuditIntervalMs = 60000, StaleAuditForgetMs = 600000;
+        sealed class StaleAudit { public double LastLine; public long Count; }
+        readonly Dictionary<EndPoint, StaleAudit> staleAudits = new Dictionary<EndPoint, StaleAudit>();
+        void AuditStale(EndPoint from, double nowMs)
+        {
+            StaleAudit entry;
+            if (staleAudits.TryGetValue(from, out entry))
+            {
+                entry.Count++;
+                if (nowMs - entry.LastLine < StaleAuditIntervalMs) return;
+            }
+            else
+            {
+                if (staleAudits.Count >= 1024)
+                {
+                    List<EndPoint> old = new List<EndPoint>();
+                    foreach (KeyValuePair<EndPoint, StaleAudit> e in staleAudits)
+                        if (nowMs - e.Value.LastLine >= StaleAuditForgetMs) old.Add(e.Key);
+                    foreach (EndPoint endpoint in old) staleAudits.Remove(endpoint);
+                    if (staleAudits.Count >= 1024) return;
+                }
+                entry = new StaleAudit { Count = 1 };
+                staleAudits[from] = entry;
+            }
+            Audit("stale_goodbye", from, null, null, null, null, StaleReason, " count=" + entry.Count);
+            entry.LastLine = nowMs; entry.Count = 0;
         }
 
         // A NetPeer Goodbye (magic 0x4F43, type 5, the session id, u16 length + UTF-8 reason; little endian) for the
@@ -217,8 +266,99 @@ namespace OriCoop.CServer
             return goodbye;
         }
 
-        void Disconnected(Connection connection)
+        // T-170: user text (nicks, peer reasons) quoted on one line: backslash, quote and every control character
+        // escaped, so a nick can never start a forged line or break a column.
+        public static string AuditText(string text)
         {
+            if (text == null) return "\"\"";
+            StringBuilder b = new StringBuilder(text.Length + 2);
+            b.Append('"');
+            foreach (char c in text)
+            {
+                if (c == '\\') b.Append("\\\\");
+                else if (c == '"') b.Append("\\\"");
+                else if (c == '\n') b.Append("\\n");
+                else if (c == '\r') b.Append("\\r");
+                else if (c == '\t') b.Append("\\t");
+                else if (c < 0x20 || c == 0x7F || (c >= 0x80 && c < 0xA0) || c == '\u2028' || c == '\u2029')
+                    b.Append("\\u").Append(((int)c).ToString("x4"));
+                else b.Append(c);
+            }
+            return b.Append('"').ToString();
+        }
+
+        static string AuditEndpoint(EndPoint endpoint)
+        {
+            IPEndPoint ip = endpoint as IPEndPoint;
+            return ip == null ? (endpoint == null ? "-" : endpoint.ToString()) : ip.Address + ":" + ip.Port;
+        }
+
+        static string AuditSeatList(List<int> seats)
+        {
+            if (seats == null || seats.Count == 0) return "-";
+            StringBuilder b = new StringBuilder();
+            foreach (int seat in seats) { if (b.Length > 0) b.Append(','); b.Append(seat); }
+            return b.ToString();
+        }
+
+        // SteamIDs and nicks of a CsJoin, in identity order (one per local player).
+        static void AuditIdentities(CsMessage request, out string steam, out string nick)
+        {
+            StringBuilder s = new StringBuilder(), n = new StringBuilder();
+            if (request.Identities.Count == 0) { s.Append(request.Steam); n.Append(AuditText(request.Nick)); }
+            foreach (CsIdentity identity in request.Identities)
+            {
+                if (s.Length > 0) { s.Append(','); n.Append(','); }
+                s.Append(identity.Steam); n.Append(AuditText(identity.Nick));
+            }
+            steam = s.ToString(); nick = n.ToString();
+        }
+
+        void Audit(string evt, EndPoint endpoint, string room, string seats, string steam, string nick, string reason)
+        {
+            Audit(evt, endpoint, room, seats, steam, nick, reason, "");
+        }
+
+        void Audit(string evt, EndPoint endpoint, string room, string seats, string steam, string nick, string reason,
+            string extra)
+        {
+            string line = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture) +
+                " " + evt + " ip=" + AuditEndpoint(endpoint) + " room=" + (String.IsNullOrEmpty(room) ? "-" : room) +
+                " seats=" + (String.IsNullOrEmpty(seats) ? "-" : seats) +
+                " steam=" + (String.IsNullOrEmpty(steam) ? "-" : steam) +
+                " nick=" + (String.IsNullOrEmpty(nick) ? "-" : nick) +
+                " reason=" + (reason == null ? "-" : AuditText(reason)) + extra;
+            Action<string> sink = AuditSink;
+            if (sink != null) sink(line);
+            if (auditPath != null) AppendLine(auditPath, line);
+        }
+
+        // Opened, appended and closed per line (events are rare): nothing is buffered, and logrotate can simply
+        // rename the file (the next line creates a new one), no copytruncate needed.
+        public static void AppendLine(string path, string line)
+        {
+            try
+            {
+                byte[] bytes = new UTF8Encoding(false).GetBytes(line + "\n");
+                using (FileStream file = new FileStream(path, FileMode.Append, FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete))
+                    file.Write(bytes, 0, bytes.Length);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        void AuditEnd(Connection connection, string reason)
+        {
+            if (connection.AuditEnded) return;
+            connection.AuditEnded = true;
+            Audit(reason == "timed out" ? "timeout" : "leave", connection.Endpoint, connection.AuditRoom,
+                connection.AuditSeats, connection.AuditSteam, connection.AuditNick, reason);
+        }
+
+        void Disconnected(Connection connection, string reason)
+        {
+            AuditEnd(connection, reason);
             peers.Remove(connection.Endpoint);
             connection.Route.Dispose();
             if (connection.Room == null) return;
@@ -259,14 +399,21 @@ namespace OriCoop.CServer
                 rooms.Add(code, room);
             }
             else if (!rooms.TryGetValue(request.Code, out room)) failure = 1;
+            string steam, nick;
+            AuditIdentities(request, out steam, out nick);
             if (failure != 0)
             {
+                Audit(request.Mode == 2 ? "rejoin_refused" : "join_refused", connection.Endpoint, request.Code, null,
+                    steam, nick, RefusalReason(failure));
                 Send(connection, CsWire.Encode(new CsMessage { Type = CsWire.CsWelcome, Result = failure }), true);
                 return;
             }
             int seat; byte[] welcome;
             List<Outgoing> output = room.Arbiter.Join(request, nowMs, out seat, out welcome);
             Send(connection, welcome, true);
+            if (seat == 0)
+                Audit(request.Mode == 2 ? "rejoin_refused" : "join_refused", connection.Endpoint, room.Code, null,
+                    steam, nick, RefusalReason(CsWire.Decode(welcome).Result));
             if (seat != 0)
             {
                 Connection previous = Owner(room, seat);
@@ -278,8 +425,25 @@ namespace OriCoop.CServer
                 }
                 connection.Room = room; connection.Seats = room.Arbiter.ConnectionSeats(seat);
                 room.Members.Add(connection);
+                connection.AuditRoom = room.Code; connection.AuditSeats = AuditSeatList(connection.Seats);
+                connection.AuditSteam = steam; connection.AuditNick = nick;
+                Audit(request.Mode == 0 ? "create" : request.Mode == 2 ? "rejoin" : "join", connection.Endpoint,
+                    room.Code, connection.AuditSeats, steam, nick, null);
             }
             Dispatch(room, output, true);
+        }
+
+        // CsWelcome result codes (Arbiter.Join / CServerClient): 1 no room, 2 full, 3 version, 4 token unknown.
+        static string RefusalReason(byte result)
+        {
+            switch (result)
+            {
+                case 1: return "no_room";
+                case 2: return "full";
+                case 3: return "version";
+                case 4: return "bad_token";
+                default: return "result " + result;
+            }
         }
 
         static Connection Owner(Room room, int seat)
@@ -362,15 +526,16 @@ namespace OriCoop.CServer
                     connection.Peer = new NetPeer(connection.Route);
                     connection.Peer.TimeoutMs = PeerTimeoutMs;
                     Connection captured = connection;
-                    connection.Peer.Disconnected += delegate(string reason) { Disconnected(captured); };
+                    connection.Peer.Disconnected += delegate(string reason) { Disconnected(captured, reason); };
                     connection.Peer.Listen(); peers.Add(from, connection);
+                    Audit("connect", from, null, null, null, null, null);
                 }
                 connection.Route.Enqueue(buffer, length);
             }
             foreach (Connection connection in new List<Connection>(peers.Values))
             {
                 connection.Peer.Poll();
-                if (connection.Peer.State == PeerState.Listening) { Disconnected(connection); continue; }
+                if (connection.Peer.State == PeerState.Listening) { Disconnected(connection, "handshake failed"); continue; }
                 byte[] bytes; bool reliable;
                 while (connection.Peer.TryReceive(out bytes, out reliable))
                 {
@@ -399,6 +564,7 @@ namespace OriCoop.CServer
         {
             foreach (Connection connection in peers.Values)
             {
+                AuditEnd(connection, "server stopped");
                 connection.Peer.Disconnect("server stopped"); connection.Route.Dispose();
             }
             peers.Clear();

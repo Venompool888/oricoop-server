@@ -1,0 +1,25 @@
+# T-170: /etc/logrotate.d/oricoop-cserver
+# connections.log (IP, SteamID, nick per connection event): weekly, 26 weeks kept, compressed.
+# The server opens, appends and closes the file per line, so a plain rename is safe (no copytruncate).
+/var/log/oricoop-cserver/connections.log {
+    su oricoop-cserver oricoop-cserver
+    weekly
+    rotate 26
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 oricoop-cserver oricoop-cserver
+}
+
+# Per-room event logs (<room code>.log, no IPs or SteamIDs): same retention, no new empty file after rotation.
+/var/log/oricoop-cserver/[0-9][0-9][0-9][0-9][0-9][0-9].log {
+    su oricoop-cserver oricoop-cserver
+    weekly
+    rotate 26
+    compress
+    delaycompress
+    missingok
+    notifempty
+    nocreate
+}
