@@ -104,6 +104,8 @@ namespace OriCoop.CServer
             // T-170: who this connection said it is (from its accepted CsJoin), for the audit lines after it is gone.
             public string AuditRoom, AuditSeats, AuditSteam, AuditNick;
             public bool AuditEnded;
+            // T-173: when this connection last got a room list, and when a list reply went to it while it had no room.
+            public double LastListAt = Double.NegativeInfinity, ListedAt = -1;
         }
 
         sealed class Room
@@ -129,6 +131,12 @@ namespace OriCoop.CServer
         static volatile bool quitting;
         // Receive timeout of each client connection (NetPeer's default); tests shorten it.
         public int PeerTimeoutMs = 10000;
+        // T-173: CsList limits. One reply per endpoint per ListIntervalMs (extra requests are ignored), none while that
+        // connection still has more than ListMaxPending reliable fragments unacknowledged, and a connection that only
+        // listed (never joined) is closed ListCloseMs after its last reply. Without them one endpoint could queue
+        // megabytes of reliable room lists per datagram. Tests shorten or disable them.
+        public double ListIntervalMs = 1000, ListCloseMs = 3000;
+        public int ListMaxPending = 256;
         public long StaleGoodbyes { get; private set; }
 
         // T-170: opt-in connection audit log. When enabled, each event goes to stdout and, with a log directory,
@@ -186,6 +194,19 @@ namespace OriCoop.CServer
                     room.Log.WriteLine(e.Id + " " + e.From + " " + e.Seq + " " + e.Kind + " " +
                         Convert.ToBase64String(Encoding.UTF8.GetBytes(e.Key)) + " " + Convert.ToBase64String(e.Data));
                     room.Log.Flush();
+                }
+                if (item.Message[0] == CsWire.CsRoster)
+                {
+                    CsMessage roster = CsWire.Decode(item.Message);
+                    foreach (Connection member in room.Members)
+                    {
+                        if (member.Seats.Count == 0) continue;
+                        CsMessage identities = new CsMessage();
+                        foreach (CsRosterEntry entry in roster.Roster)
+                            if (member.Seats.Contains(entry.Seat)) identities.Identities.Add(new CsIdentity { Steam = entry.Steam, Nick = entry.Nick });
+                        member.AuditSeats = AuditSeatList(member.Seats);
+                        AuditIdentities(identities, out member.AuditSteam, out member.AuditNick);
+                    }
                 }
                 foreach (Connection member in room.Members)
                     if (item.To == 0 || member.Seats.Contains(item.To) ||
@@ -383,9 +404,9 @@ namespace OriCoop.CServer
             return code;
         }
 
-        void Error(Connection connection, string text, double nowMs)
+        void Error(Connection connection, string text, double nowMs, byte errorCode = 1)
         {
-            Send(connection, CsWire.Encode(new CsMessage { Type = CsWire.CsError, ErrorCode = 1, Text = text }), true);
+            Send(connection, CsWire.Encode(new CsMessage { Type = CsWire.CsError, ErrorCode = errorCode, Text = text }), true);
             connection.Peer.Flush();
             connection.ClosingAt = nowMs;
         }
@@ -441,7 +462,7 @@ namespace OriCoop.CServer
             Dispatch(room, output, true);
         }
 
-        // CsWelcome result codes (Arbiter.Join / CServerClient): 1 no room, 2 full, 3 version, 4 token unknown.
+        // CsWelcome result codes (Arbiter.Join / CServerClient): 1 no room, 2 full, 3 version, 4 token unknown, 5 kicked.
         static string RefusalReason(byte result)
         {
             switch (result)
@@ -450,6 +471,7 @@ namespace OriCoop.CServer
                 case 2: return "full";
                 case 3: return "version";
                 case 4: return "bad_token";
+                case 5: return "kicked";
                 default: return "result " + result;
             }
         }
@@ -464,14 +486,33 @@ namespace OriCoop.CServer
         {
             if (connection.ClosingAt >= 0) return;
             if (bytes.Length < 2) { Error(connection, "message needs type and seat", nowMs); return; }
+            if (bytes[0] == CsWire.CsList)
+            {
+                // T-173: nothing to decode (a CsList has no body; trailing bytes are ignored), rate limited per endpoint.
+                if (nowMs - connection.LastListAt < ListIntervalMs ||
+                    connection.Peer.Stats.ReliablePending > ListMaxPending) return;
+                connection.LastListAt = nowMs;
+                CsMessage list = new CsMessage { Type = CsWire.CsRoomList };
+                foreach (Room room in rooms.Values)
+                {
+                    CsRoomListEntry entry = room.Arbiter.Listing();
+                    // T-173: only rooms whose manager published a room info text are public. Rooms hosted for 我的房间
+                    // (and password rooms) never set one, so their codes are not handed to strangers.
+                    if (entry.Online > 0 && entry.Text.Length > 0) list.Rooms.Add(entry);
+                    if (list.Rooms.Count == 64) break;
+                }
+                Send(connection, CsWire.Encode(list), true);
+                if (connection.Room == null) connection.ListedAt = nowMs;
+                return;
+            }
             if (connection.Room == null)
             {
-                if (bytes[0] != CsWire.CsJoin) { Error(connection, "first message must be CsJoin", nowMs); return; }
+                if (bytes[0] != CsWire.CsJoin) { Error(connection, "first message must be CsJoin or CsList", nowMs); return; }
                 Join(connection, CsWire.Decode(bytes), nowMs);
                 return;
             }
             if (!connection.Seats.Contains(bytes[1])) { DroppedSenders++; return; }
-            if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsSeatRelease)
+            if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsKick)
             {
                 CsMessage message = CsWire.Decode(bytes);
                 if (message.Type == CsWire.CsTo)
@@ -479,7 +520,7 @@ namespace OriCoop.CServer
                     if (message.Inner.Length < 2) return;
                     if (!connection.Seats.Contains(message.Inner[1])) { DroppedSenders++; return; }
                     // CsTo wraps game traffic only; never tunnel server/control messages to another client.
-                    if (message.Inner[0] >= CsWire.CsJoin && message.Inner[0] <= CsWire.CsSeatRelease) return;
+                    if (message.Inner[0] >= CsWire.CsJoin && message.Inner[0] <= CsWire.CsKick) return;
                     Connection target = Owner(connection.Room, message.Target);
                     if (target != null && target != connection) Send(target, message.Inner, reliable);
                 }
@@ -488,6 +529,21 @@ namespace OriCoop.CServer
                     int primary = connection.PrimarySeat;
                     List<Outgoing> output = connection.Room.Arbiter.Handle(message.Seat, message, nowMs);
                     connection.Seats = connection.Room.Arbiter.ConnectionSeats(primary);
+                    if (message.Type == CsWire.CsKick)
+                        foreach (Outgoing item in output)
+                        {
+                            if (item.Message[0] != CsWire.CsError) continue;
+                            CsMessage error = CsWire.Decode(item.Message);
+                            if (error.ErrorCode != 3) continue;
+                            Connection victim = Owner(connection.Room, item.To);
+                            if (victim == null) continue;
+                            Audit("kick", victim.Endpoint, victim.AuditRoom, victim.AuditSeats, victim.AuditSteam,
+                                victim.AuditNick, "by seat " + message.Seat);
+                            victim.AuditEnded = true;
+                            Error(victim, error.Text, nowMs, error.ErrorCode);
+                            connection.Room.Members.Remove(victim);
+                            victim.Room = null;
+                        }
                     Dispatch(connection.Room, output, message.Type == CsWire.CsState ? reliable : true);
                 }
                 return;
@@ -547,10 +603,25 @@ namespace OriCoop.CServer
                 byte[] bytes; bool reliable;
                 while (connection.Peer.TryReceive(out bytes, out reliable))
                 {
+                    // T-173: any failure while handling one message (malformed, invalid UTF-8, too many entries, ...)
+                    // closes only that connection; it used to leave Step and stop the whole server.
                     try { Receive(connection, bytes, reliable, nowMs); }
-                    catch (IOException) { Error(connection, "invalid Cs message", nowMs); }
+                    catch (Exception e)
+                    {
+                        if (!(e is IOException) && !(e is InvalidDataException))   // malformed input: no log line per packet
+                            Console.Error.WriteLine("C-server: message from " + AuditEndpoint(connection.Endpoint) +
+                                " failed: " + e.GetType().Name + ": " + e.Message);
+                        if (connection.ClosingAt < 0)
+                            try { Error(connection, "invalid Cs message", nowMs); } catch (Exception) { connection.ClosingAt = nowMs; }
+                    }
                 }
                 connection.Peer.Flush();
+                if (connection.Room == null && connection.ListedAt >= 0 && connection.ClosingAt < 0 &&
+                    nowMs - connection.ListedAt >= ListCloseMs)
+                {
+                    connection.Peer.Disconnect("room list done"); connection.Peer.Poll();
+                    continue;
+                }
                 if (connection.ClosingAt >= 0 && nowMs - connection.ClosingAt >= 20 &&
                     (connection.Peer.Stats.ReliablePending == 0 || nowMs - connection.ClosingAt >= 500))
                 {

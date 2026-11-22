@@ -10,13 +10,13 @@ the mod uses between players.
 传输层是 `shared/net/NetPeer.cs`（mod 自己的 UDP 层："CO" 握手、可靠/不可靠、分片、ACK）。连上后每条应用消息是
 `[类型 u8][座位 u8][内容]`，和 mod 里玩家之间的格式相同。
 
-C-server control messages use ids 176-188 (0xB0-0xBC). Strings are `u8 length + UTF-8`; integers are little endian.
-C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + UTF-8`；整数小端。
+C-server control messages use ids 176-192 (0xB0-0xC0). Strings are `u8 length + UTF-8`; integers are little endian.
+C-server 控制消息占 176–192（0xB0–0xC0）。字符串 = `u8 长度 + UTF-8`；整数小端。
 
 | id | name | direction | payload |
 |---|---|---|---|
 | 176 | CsJoin | client → server | `proto u8 (=2)`, `mode u8` (0 new room / 1 join by code / 2 reconnect by token), `code str`, `token 16B`, `count u8` (1-3), then per seat `steam u64, nick str` |
-| 177 | CsWelcome | server → client | `result u8` (0 ok, 1 no such room, 2 full, 3 protocol mismatch, 4 bad token), `count u8 + seats[count] u8` (ascending), `code str`, the connection's `token 16B`, `lastEvent u32` |
+| 177 | CsWelcome | server → client | `result u8` (0 ok, 1 no such room, 2 full, 3 protocol mismatch, 4 bad token, 5 kicked from this room), `count u8 + seats[count] u8` (ascending), `code str`, the connection's `token 16B`, `lastEvent u32` |
 | 178 | CsRoster | server → all | `n u8`, then per seat `seat u8, online u8, steam u64, nick str` |
 | 179 | CsLease | client → server | `op u8` (1 request, 2 release), `key str`, `score f32`, `active u8` |
 | 180 | CsGrant | server → all | `key str`, `owner u8` (0 = nobody), `epoch u32` |
@@ -28,6 +28,39 @@ C-server 控制消息占 176–188（0xB0–0xBC）。字符串 = `u8 长度 + U
 | 186 | CsTo | client → server → the connection owning a seat | `target u8` + a complete inner message |
 | 187 | CsSeatAdd | client → server | `steam u64, nick str`: ask for one more seat (lowest free) |
 | 188 | CsSeatRelease | client → server | `seat u8`: free one non-primary seat of this connection now; `seat = 0`: this device leaves the room and all its seats are freed now (no 60 s hold) |
+| 189 | CsList | client → server | no payload (extra bytes are ignored). Allowed before joining (seat 0) or inside a room; the same connection may still send CsJoin afterwards |
+| 190 | CsRoomList | server → client | `count u8` (at most 64), then per room `code str, online u8, capacity u8 (4), nickCount u8, nicks[nickCount] str, text str` |
+| 191 | CsRoomInfo | manager device → server | `text str`: the room description shown in the room list (ignored from other devices) |
+| 192 | CsKick | manager device → server | `target u8` (1-4): remove the device that owns this seat |
+
+## Room list, room info and kick / 房间列表、房间说明、踢出 (OriCoop v0.2.4)
+
+- **CsList / CsRoomList.** At most one reply per endpoint per second (extra requests are ignored), and none while that
+  connection has more than 256 unacknowledged reliable fragments. A connection that only lists and never joins is
+  closed 3 s after its last reply. The list holds only rooms with at least one online seat whose manager set a
+  non-empty description; `online` counts online seats, nicks are in seat order, held offline seats are not listed and a
+  seat without a nick is listed as `P<seat>`. Rooms that should stay private (OriCoop's long-lived rooms joined by
+  invite code) never set a description, so they are never listed.
+- **CsRoomInfo.** The manager is the device owning the lowest online seat; when it leaves, the next one takes over.
+  Descriptions and nicks are cut to 255 UTF-8 bytes on whole characters. The description is cleared when nobody is online.
+- **CsKick.** Only the manager may kick, and only another device: all seats of the target device are freed at once and
+  a new roster is broadcast. The kicked connection gets `CsError(code=3, text="server.err.kicked")` and is then
+  disconnected. A request from a non-manager, for its own device or for an empty seat gets `CsError(code=2)` and changes
+  nothing. Every non-zero SteamID of the kicked device is refused (`CsWelcome.result = 5`) for mode 1 and 2 joins while
+  the room exists (not stored on disk). SteamID 0 (no Steam) is never banned.
+- Strings are decoded as strict UTF-8; a malformed or oversized message closes only the connection that sent it.
+  `CsTo` never carries any message in 176-192.
+- With connection logging on (`--log-connections`), a kick is logged as event `kick` (target IP, seats, SteamIDs, nicks,
+  reason `by seat N`) and a refused rejoin with reason `kicked`.
+
+- **CsList / CsRoomList**：每个端点每秒最多回一次，多余请求忽略；该连接未确认的可靠分片超过 256 个时不回。只查询、从不加入的连接在最后一次回复 3 秒后关闭。
+  只列出至少一个座位在线、且管理者设置了非空说明的房间；人数按在线座位计，昵称按座位顺序，离线保留的座位不列，没有昵称的座位显示为 `P<座位>`。
+  需要保密的房间（OriCoop 用邀请码加入的长期房间）不设说明，所以不会出现在列表里。
+- **CsRoomInfo**：管理者是最低在线座位所在的设备，离开后由下一个接替。说明和昵称按整字符截到 255 个 UTF-8 字节；没人在线时说明清空。
+- **CsKick**：只有管理者能踢，而且只能踢别的设备：目标设备的全部座位立即释放，广播新的 Roster。被踢的连接先收到 `CsError(code=3, text="server.err.kicked")` 再断开。
+  非管理者、踢自己的设备或空座位的请求回 `CsError(code=2)`，房间不变。被踢设备的所有非 0 SteamID 在房间存续期间不能用 mode 1、2 加入（`CsWelcome.result = 5`，不写盘）；SteamID 0（没有 Steam）从不封禁。
+- 字符串按严格 UTF-8 解码；畸形或超长的消息只关闭发送它的连接。`CsTo` 不会转发 176–192 的任何消息。
+- 开启连接日志（`--log-connections`）时，踢人记为事件 `kick`（目标 IP、座位、SteamID、昵称，原因 `by seat N`），被拒的重进记原因 `kicked`。
 
 ## Multi-seat devices / 一台设备多个座位 (v2)
 

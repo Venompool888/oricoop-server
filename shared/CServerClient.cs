@@ -49,6 +49,15 @@ namespace OriCoop.Authority
         public bool RejoinFallsBackToJoin { get; set; }
         public string RefusedWith { get; private set; }   // T-148: server.err.* of a refused join (null until then)
         public bool UsedFallback { get; private set; }
+        // T-173: true once this client's own mode-0 join created the room (this PC is the room's creator), or once a token
+        // rejoin restored the seats of a room this PC created (RejoinCreated, carried over by CServerLink). False for
+        // joiners, after a token rejoin into someone else's room and after a rejoin that fell back to a fresh join.
+        public bool Created { get; private set; }
+        public bool RejoinCreated { get; set; }
+
+        // T-173: a session refused or ended with this L10n key must not reconnect: a kicked PC's token rejoin and fresh
+        // join are both refused for the rest of the room's life, so NetPlay's retry loop would only be refused again.
+        public static bool RetryAllowed(string refusedWith) { return refusedWith != "server.err.kicked"; }
 
         // T-113: join mode for a connection attempt. A guest joining the room it last sat in (menu re-entry with the
         // same code, or NetPlay reconnecting) rejoins its seat with the saved token, falling back to a fresh join.
@@ -83,6 +92,7 @@ namespace OriCoop.Authority
                         seats.Clear(); seats.AddRange(message.Seats);
                         Code = message.Code;
                         Token = message.Token;
+                        Created = m_request.Mode == 0 || (m_request.Mode == 2 && RejoinCreated);
                         if (SeatAssigned != null) SeatAssigned(Seat);
                     }
                     else if (message.Result == 4 && RejoinFallsBackToJoin && m_request.Mode == 2 && !string.IsNullOrEmpty(m_request.Code))
@@ -96,7 +106,7 @@ namespace OriCoop.Authority
                     else
                     {
                         // L10n keys (the Unity glue shows L10n.T(key)); this file stays free of Unity code.
-                        string[] reasons = { "", "server.err.noroom", "server.err.full", "server.err.version", "server.err.token" };
+                        string[] reasons = { "", "server.err.noroom", "server.err.full", "server.err.version", "server.err.token", "server.err.kicked" };
                         string key = message.Result < reasons.Length ? reasons[message.Result] : "server.err.version";
                         if (JoinFailed != null) JoinFailed(key);
                         // T-148: a refused join left a connected, seatless peer: NetPlay stayed "connecting" (never retried,
@@ -107,7 +117,12 @@ namespace OriCoop.Authority
                 case CsWire.CsRoster:
                     bool[] previous = online;
                     online = new bool[5];
-                    foreach (CsRosterEntry entry in message.Roster) online[entry.Seat] = entry.Online;
+                    taken = new bool[5]; nicks = new string[5];   // T-171: the room page shows every seat's name
+                    foreach (CsRosterEntry entry in message.Roster)
+                    {
+                        online[entry.Seat] = entry.Online;
+                        if (entry.Seat >= 1 && entry.Seat <= 4) { taken[entry.Seat] = true; nicks[entry.Seat] = entry.Nick ?? ""; }
+                    }
                     int oldArbiter = ArbiterSeat;
                     ArbiterSeat = 0;
                     for (int seat = 1; seat <= 4; seat++)
@@ -120,7 +135,9 @@ namespace OriCoop.Authority
                     if (oldArbiter != ArbiterSeat && ArbiterChanged != null) ArbiterChanged(ArbiterSeat);
                     break;
                 case CsWire.CsError:
+                    if (message.Text == "server.err.kicked") RefusedWith = message.Text;
                     if (JoinFailed != null) JoinFailed(message.Text);
+                    if (message.Text == "server.err.kicked") Peer.Disconnect(message.Text);
                     break;
                 default:
                     Authority.Receive(csMessage);
@@ -173,6 +190,31 @@ namespace OriCoop.Authority
             RequireLocal(sender);
             Send(CsWire.Encode(new CsMessage { Type = CsWire.CsTo, Seat = (byte)sender,
                 Target = (byte)target, Inner = GameMessage(sender, type, body) }), reliable);
+        }
+
+        public void Kick(int seat)
+        {
+            SendAs(PrimarySeat, CsWire.Encode(new CsMessage { Type = CsWire.CsKick, Target = (byte)seat }), true);
+        }
+
+        // T-171: seats in the room (online or held for a reconnect) and their names, from the latest roster.
+        bool[] taken = new bool[5];
+        string[] nicks = new string[5];
+        public bool SeatTaken(int seat) { return seat >= 1 && seat <= 4 && taken[seat]; }
+        public bool SeatOnlineNow(int seat) { return seat >= 1 && seat <= 4 && online[seat]; }
+        public string SeatNick(int seat) { return seat >= 1 && seat <= 4 && nicks[seat] != null ? nicks[seat] : ""; }
+        public string RoomInfo { get; private set; }   // the room info text this client last sent (or kept, see Private)
+
+        // T-173 (review F10): a room the room service runs (我的房间 / password rooms, RoomSession) is private: the server
+        // lists only rooms whose manager set a room info text, so SetRoomInfo keeps the text here and sends nothing, and
+        // the room's code never shows on the server's public room list.
+        public bool Private { get; set; }
+
+        public void SetRoomInfo(string text)
+        {
+            RoomInfo = text;
+            if (Private) return;
+            SendAs(PrimarySeat, CsWire.Encode(new CsMessage { Type = CsWire.CsRoomInfo, Text = text }), true);
         }
 
         public void AddSeat(ulong steam, string nick)

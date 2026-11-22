@@ -287,11 +287,30 @@ namespace OriCoop.CServer
                 CsWire.Decode(sent[0].Bytes).Seat == 3);
         }
 
+        static void RoomInfoClearsWhenEmpty()
+        {
+            Arbiter room = new Arbiter("234567", new ArbiterOptions(), 0);
+            room.JoinAt(1, 1, "one", 0);
+            room.JoinAt(2, 2, "two", 0);
+            room.Handle(1, new CsMessage { Type = CsWire.CsRoomInfo, Text = "old" }, 1);
+            room.Offline(1, 2);
+            room.Handle(2, new CsMessage { Type = CsWire.CsRoomInfo, Text = "next" }, 3);
+            CsRoomListEntry listing = room.Listing();
+            Check("room_info_manager_follows_online_not_held_seats", listing.Online == 1 && listing.Text == "next"
+                && listing.Nicks.Count == 1 && listing.Nicks[0] == "two");
+            room.Offline(2, 4);
+            room.JoinAt(2, 2, "two", 5);
+            Check("room_info_cleared_when_last_device_offline", room.Listing().Text == "");
+            room.Handle(2, new CsMessage { Type = CsWire.CsRoomInfo, Text = "again" }, 6);
+            room.Handle(2, new CsMessage { Type = CsWire.CsSeatRelease, Target = 0 }, 7);
+            Check("room_info_cleared_when_last_device_releases", room.Listing().Online == 0 && room.Listing().Text == "");
+        }
+
         public static int Main()
         {
             try
             {
-                UnannouncedGuest(); EventsAndClaims(); LeasesAndStates(); RejoinAndReset(); ClientProtocol(); OfflineAndSeatIdentity();
+                UnannouncedGuest(); EventsAndClaims(); LeasesAndStates(); RejoinAndReset(); ClientProtocol(); OfflineAndSeatIdentity(); RoomInfoClearsWhenEmpty();
             }
             catch (Exception e) { Check("unexpected exception: " + e, false); }
             Console.WriteLine("RESULT " + (passed == total ? "PASS " : "FAIL ") + passed + "/" + total);

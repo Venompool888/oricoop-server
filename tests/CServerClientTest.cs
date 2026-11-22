@@ -80,7 +80,7 @@ namespace OriCoop.CServer
                 byte[] bytes; bool reliable;
                 while (c.Session.Peer.TryReceive(out bytes, out reliable))
                 {
-                    if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsSeatRelease)
+                    if (bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsKick)
                     {
                         if (bytes[0] == CsWire.CsSnapshot) c.Snapshots++;
                         c.Session.Receive(bytes);
@@ -337,6 +337,147 @@ namespace OriCoop.CServer
                 rejoin.Snapshots == 1 && rejoin.Session.Authority.LocalSeat == 1);
         }
 
+        static void RoomListAndKickTests()
+        {
+            Client manager = Join(0, "", null), target = Join(1, manager.Session.Code, null);
+            manager.Session.SetRoomInfo("lv=1;pct=6;area=林地");
+            RunFor(30);
+            List<CsRoomListEntry> entries = null;
+            string error = null;
+            Thread fetch = new Thread(delegate() { entries = CServerRoomList.Fetch(
+                new IPEndPoint(IPAddress.Loopback, server.LocalPort), 700, out error); });
+            fetch.Start();
+            Until(delegate { return !fetch.IsAlive; }, 1500); fetch.Join();
+            CsRoomListEntry entry = entries == null ? null : entries.Find(delegate(CsRoomListEntry r) { return r.Code == manager.Session.Code; });
+            Check("fetch_inprocess_room_entry", error == null && entry != null && entry.Online == 2 && entry.Capacity == 4
+                && entry.Nicks.Count == 2 && entry.Nicks[0] == "player0" && entry.Text == "lv=1;pct=6;area=林地");
+            int deadPort;
+            using (OriCoop.Net.UdpTransport unused = new OriCoop.Net.UdpTransport(0)) deadPort = unused.LocalPort;
+            Stopwatch timeout = Stopwatch.StartNew();
+            entries = CServerRoomList.Fetch(new IPEndPoint(IPAddress.Loopback, deadPort), 150, out error);
+            Check("fetch_dead_port_timeout", entries == null && !String.IsNullOrEmpty(error) && timeout.ElapsedMilliseconds >= 150
+                && timeout.ElapsedMilliseconds < 500);
+            manager.Session.Kick(target.Session.Seat);
+            Check("client_kicked_error_refused_and_disconnect", Until(delegate { return target.Failures.Count == 1; }, 700)
+                && target.Failures[0] == "server.err.kicked" && target.Session.RefusedWith == "server.err.kicked"
+                && target.Session.Peer.State == OriCoop.Net.PeerState.Disconnected
+                && target.Session.Peer.DisconnectReason == "server.err.kicked");
+            // T-173 (review F03): a kicked session ends for good; only other refusals and drops reconnect.
+            Check("client_kicked_never_retries", !CServerClient.RetryAllowed(target.Session.RefusedWith)
+                && CServerClient.RetryAllowed("server.err.token") && CServerClient.RetryAllowed("server.err.noroom")
+                && CServerClient.RetryAllowed(null) && CServerClient.RetryAllowed("timed out"));
+            Client blocked = new Client(2, manager.Session.Code, target.Session.Token);
+            blocked.Session.RejoinFallsBackToJoin = true; clients.Add(blocked);
+            blocked.Session.Receive(CsWire.Encode(new CsMessage { Type = CsWire.CsWelcome, Result = 5 }));
+            Check("client_result5_maps_kicked_no_fallback", blocked.Failures.Count == 1 && blocked.Failures[0] == "server.err.kicked"
+                && blocked.Session.RefusedWith == "server.err.kicked" && !blocked.Session.UsedFallback
+                && blocked.Session.Peer.DisconnectReason == "server.err.kicked");
+            manager.Leave(); target.Leave(); blocked.Leave();
+
+            // T-173 (review F10): a room-service room (我的房间 / password room, CServerClient.Private) sets its room info
+            // locally only, so the server's public list (rooms with a room info text) never shows its code.
+            Client hidden = Join(0, "", null);
+            hidden.Session.Private = true;
+            hidden.Session.SetRoomInfo("lv=1;pct=6;area=林地");
+            RunFor(30);
+            List<CsRoomListEntry> listed = null;
+            string listError = null;
+            Thread list = new Thread(delegate() { listed = CServerRoomList.Fetch(
+                new IPEndPoint(IPAddress.Loopback, server.LocalPort), 700, out listError); });
+            list.Start();
+            Until(delegate { return !list.IsAlive; }, 1500); list.Join();
+            Check("private_room_info_stays_off_room_list", listError == null && listed != null
+                && hidden.Session.RoomInfo == "lv=1;pct=6;area=林地"
+                && !listed.Exists(delegate(CsRoomListEntry r) { return r.Code == hidden.Session.Code; }));
+            hidden.Leave();
+        }
+
+        // T-173: CServerClient.Created = this PC created the room (its own mode-0 join, or a token rejoin of a room it created).
+        static void CreatedTests()
+        {
+            Client creator = Join(0, "", null), joiner = Join(1, creator.Session.Code, null);
+            Check("created_true_for_mode0_false_for_joiner", creator.Session.Created && !joiner.Session.Created);
+            string code = creator.Session.Code;
+            Client back = new Client(2, code, creator.Session.Token);
+            back.Session.RejoinCreated = true; clients.Add(back);
+            Client joinerBack = new Client(2, code, joiner.Session.Token);
+            clients.Add(joinerBack);
+            Check("created_kept_by_creator_token_rejoin_not_by_joiner", Until(delegate {
+                return back.Assigned.Count == 1 && joinerBack.Assigned.Count == 1; }, 1500)
+                && back.Session.Created && !joinerBack.Session.Created);
+            Client fallback = new Client(2, code, new byte[16]);
+            fallback.Session.RejoinFallsBackToJoin = true; fallback.Session.RejoinCreated = true; clients.Add(fallback);
+            Check("created_false_after_rejoin_falls_back_to_join", Until(delegate { return fallback.Assigned.Count == 1; }, 1500)
+                && fallback.Session.UsedFallback && !fallback.Session.Created);
+            creator.Leave(); joiner.Leave(); back.Leave(); joinerBack.Leave(); fallback.Leave();
+        }
+
+        static CsRoomListEntry Room(string code, params string[] nicks)
+        {
+            CsRoomListEntry room = new CsRoomListEntry { Code = code, Online = (byte)nicks.Length, Text = "t" };
+            room.Nicks.AddRange(nicks);
+            return room;
+        }
+
+        static List<CsRoomListEntry> Rooms(params CsRoomListEntry[] rooms) { return new List<CsRoomListEntry>(rooms); }
+
+        // T-173 (review F14, F15, F16): the room list page's state (NativeCsRooms over CsRoomListCache).
+        static void RoomListCacheTests()
+        {
+            CsRoomListCache cache = new CsRoomListCache();
+            int a = cache.BeginFetch("a:47022", 0, 5);
+            int b = cache.BeginFetch("b:47022", 0.5, 5);
+            bool staleDropped = a >= 0 && b >= 0 && a != b && !cache.Complete(a, Rooms(Room("111111", "x")))
+                && cache.TakeShown(1).Count == 0 && cache.State == CsRoomListCache.Loading;
+            bool failedClean = cache.Complete(b, null) && cache.State == CsRoomListCache.Failed && cache.TakeShown(2).Count == 0;
+            Check("room_list_slow_fetch_for_previous_server_dropped", staleDropped && failedClean);
+            Check("room_list_fetch_not_due_inside_interval", cache.BeginFetch("b:47022", 1, 5) == -1);
+
+            int c = cache.BeginFetch("b:47022", 10, 5);
+            cache.Complete(c, Rooms(Room("222222", "x"), Room("333333", "y")));
+            List<CsRoomListEntry> drawn = cache.TakeShown(3);
+            int d = cache.BeginFetch("b:47022", 20, 5);
+            cache.Complete(d, Rooms(Room("333333", "y")));
+            bool pressMapsDrawn = drawn.Count == 2 && cache.Shown(0).Code == "222222" && cache.Shown(1).Code == "333333"
+                && cache.Shown(2) == null && cache.TakeShown(3).Count == 2;
+            Check("room_list_press_maps_rows_drawn_not_newer_list", pressMapsDrawn
+                && cache.TakeShown(4).Count == 1 && cache.Shown(0).Code == "333333" && cache.Shown(1) == null);
+
+            CsRoomListCache fresh = new CsRoomListCache();
+            int e = fresh.BeginFetch("c:47022", 0, 5);
+            fresh.TakeShown(1);
+            fresh.Complete(e, Rooms(Room("444444", "z")));
+            Check("room_list_loading_row_press_does_not_join_unseen_room", fresh.Shown(0) == null);
+
+            // T-173 (review F15): a cursor move rebuilds the rows (TakeShown in a new frame) without drawing them, so a
+            // press maps to the room whose text is drawn on the row, not to `shown` at that index.
+            Func<CsRoomListEntry, string> describe = delegate(CsRoomListEntry r) { return "ROOM " + r.Code + "\n" + CsRoomListCache.PlayersLine(r); };
+            CsRoomListCache moved = new CsRoomListCache();
+            int m1 = moved.BeginFetch("d:47022", 0, 5);
+            moved.TakeShown(1);                                    // drawn: create, join, "loading..."
+            moved.Complete(m1, Rooms(Room("777777", "x")));
+            moved.TakeShown(2);                                    // cursor moved onto the status row: rows built, not drawn
+            bool statusRowNoJoin = moved.Shown(0) != null && moved.Drawn(0, "loading", describe) == null
+                && moved.Drawn(0, null, describe) == null;
+            CsRoomListEntry ra = Room("888888", "a"), rb = Room("999999", "b");
+            int m2 = moved.BeginFetch("d:47022", 10, 5);
+            moved.Complete(m2, Rooms(ra, rb));
+            moved.TakeShown(3);                                    // drawn: [A, B]
+            string drawnA = describe(ra), drawnB = describe(rb);
+            int m3 = moved.BeginFetch("d:47022", 20, 5);
+            moved.Complete(m3, Rooms(Room("999999", "b", "c"), Room("888888", "a")));
+            moved.TakeShown(4);                                    // reordered list taken by a cursor move, not drawn
+            CsRoomListEntry pressA = moved.Drawn(0, drawnA, describe), pressB = moved.Drawn(1, drawnB, describe);
+            bool reorderedJoinsDrawn = moved.Shown(0).Code == "999999" && pressA != null && pressA.Code == "888888"
+                && pressB != null && pressB.Code == "999999";
+            moved.BeginFetch("e:47022", 30, 5);
+            bool otherServerForgets = moved.Drawn(0, drawnA, describe) == null;
+            Check("room_list_press_maps_text_drawn_not_rows_built_on_cursor_move", statusRowNoJoin && reorderedJoinsDrawn && otherServerForgets);
+
+            Check("room_list_players_line_names_nameless_seats", CsRoomListCache.PlayersLine(Room("555555", "", "B")) == "P1, B"
+                && CsRoomListCache.PlayersLine(Room("666666", "A", "B")) == "A, B");
+        }
+
         public static int Main()
         {
             try
@@ -347,6 +488,9 @@ namespace OriCoop.CServer
                 Tests();
                 MultiSeatTests();
                 LeaveTests();
+                RoomListAndKickTests();
+                CreatedTests();
+                RoomListCacheTests();
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }
             finally

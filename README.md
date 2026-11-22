@@ -1,17 +1,19 @@
 # OriCoop Server (C-server)
 
-> **Experimental.** Matches OriCoop client release **v0.2.2-2026.11.21** (menu: Your Own Server / 自建服务器). Online play
-> in OriCoop v0.2.2 is a LAN host or this server; the tunnel relay is gone (T-159). Server-mode gameplay sync is still
+> **Experimental.** Matches OriCoop client release **v0.2.4-2026.11.22** (menu: Your Own Server / 自建服务器): room list,
+> room page with ready / start / kick, and long-lived rooms joined by invite code. Online play
+> in OriCoop v0.2.4 is a LAN host or this server; the tunnel relay is gone (T-159). Server-mode gameplay sync is still
 > being built. The release ships a linux-x64 package with this server and the room save service (TCP 47021).
 >
-> **实验阶段。** 对应 OriCoop 客户端发布版 **v0.2.2-2026.11.21**（菜单：自建服务器）。v0.2.2 的联机方式是局域网主机或本服务器，
+> **实验阶段。** 对应 OriCoop 客户端发布版 **v0.2.4-2026.11.22**（菜单：自建服务器）：房间列表、房间管理页（准备 / 开始 / 踢出）、用邀请码加入的长期房间。
+> v0.2.4 的联机方式是局域网主机或本服务器，
 > 隧道中继已移除（T-159）。服务器模式的玩法同步仍在完善中。同名发布附带 linux-x64 安装包：本服务器加房间存档服务（TCP 47021）。
 
 | | |
 |---|---|
 | Stage / 阶段 | **Experimental**: server + arbiter (C0), client authority layer (C1/C2), menu entry in the client; gameplay sync over the server is partly done. 实验：服务器、裁判、客户端权威层和菜单已有，玩法同步部分完成 |
 | Protocol / 协议 | **C-server wire protocol v2** (`CsJoin.proto = 2`, multi-seat devices), see [docs/PROTOCOL.md](docs/PROTOCOL.md). **v2 servers reject v1 clients.** / 协议 v2，v2 服务器拒绝 v1 客户端 |
-| Matching client / 对应客户端 | OriCoop release **v0.2.2-2026.11.21** (the same tag in the client repo; client protocol net9). 对应 OriCoop 发布版 **v0.2.2-2026.11.21**（客户端仓库同一个标签；客户端协议 net9） |
+| Matching client / 对应客户端 | OriCoop release **v0.2.4-2026.11.22** (the same tag in the client repo; client protocol net10). 对应 OriCoop 发布版 **v0.2.4-2026.11.22**（客户端仓库同一个标签；客户端协议 net10） |
 | Logs / 日志 | Opt-in connection log with each player's IP, SteamID and nickname, see [Privacy](#privacy). 连接日志默认关闭，开启后记录玩家的 IP、SteamID 和昵称 |
 | Players per room / 每房人数 | 1-4 |
 | Default port / 默认端口 | **UDP 47022** |
@@ -75,7 +77,7 @@ or the environment variables `ORICOOP_CSERVER_PORT`, `ORICOOP_CSERVER_LOG_DIR` (
   `ORICOOP_CSERVER_LOG_CONNECTIONS=true` in the environment (for systemd, in `/etc/oricoop-cserver.env`; for Docker, pass
   `-e ORICOOP_CSERVER_LOG_CONNECTIONS=true`). The variable accepts `true`/`false` and `1`/`0`. The flags
   `--log-connections` and `--no-log-connections` override the variable.
-  These options apply to builds from this source. The published `v0.2.2-2026.11.21` package always logs connections.
+  Packages from `v0.2.3-2026.11.22` on follow these options. The older `v0.2.2-2026.11.21` package always logs connections.
 - **When enabled,** the server writes one line per connection event (connect, join with seats, refused join and
   why, token rejoin, leave, timeout, goodbye to a stale session: at most one line per endpoint per minute, with `count=N`) with the time (UTC), the player's **IP address and
   port, room code, seats, SteamID64(s) and nickname(s)** when available. The line goes to stdout (journald / `docker logs`)
@@ -137,7 +139,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 - **连接日志默认关闭。** 用启动参数 `--log-connections` 或环境变量 `ORICOOP_CSERVER_LOG_CONNECTIONS=true` 开启。
   systemd 可在 `/etc/oricoop-cserver.env` 中设置，Docker 可传入 `-e ORICOOP_CSERVER_LOG_CONNECTIONS=true`。
   环境变量接受 `true`/`false` 或 `1`/`0`。`--log-connections` 和 `--no-log-connections` 的优先级高于环境变量。
-  这些选项适用于从此源码构建的版本。已发布的 `v0.2.2-2026.11.21` 安装包始终记录连接日志。
+  `v0.2.3-2026.11.22` 起的安装包都按这些选项来；更早的 `v0.2.2-2026.11.21` 安装包始终记录连接日志。
 - **开启后**，每个连接事件（连接、加入及座位、加入被拒及原因、凭令牌重连、离开、超时、给失效会话回告别：每个端点每分钟最多一行，带 `count=N`）写一行，
   内容是时间（UTC）以及事件发生时可用的 **玩家 IP 和端口、房间码、座位、SteamID64、昵称**。这一行写到标准输出（journald / `docker logs`），
   设置了日志目录时还追加到该目录的 `connections.log`。昵称会转义（引号、换行和其他控制字符），一行永远是一个事件。
@@ -148,7 +150,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build-cserver.ps1
 
 ### 协议和版本
 
-当前是 **C-server 线协议 v2**（一台设备可带多个座位，见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），对应 OriCoop 发布版 **v0.2.2-2026.11.21**。
-v2 服务器拒绝 v1 客户端；OriCoop v0.2.0-2026.11.17 的客户端请用本仓库的标签 `v0.2.0-2026.11.17` 部署。
+当前是 **C-server 线协议 v2**（一台设备可带多个座位，见 [docs/PROTOCOL.md](docs/PROTOCOL.md)），对应 OriCoop 发布版 **v0.2.4-2026.11.22**。
+v0.2.4 加了房间列表、房间说明和踢出（消息 189–192），v0.2.4 客户端要配 v0.2.4 服务器。v2 服务器拒绝 v1 客户端；OriCoop v0.2.0-2026.11.17 的客户端请用本仓库的标签 `v0.2.0-2026.11.17` 部署。
 
 许可证：[MIT](LICENSE)。

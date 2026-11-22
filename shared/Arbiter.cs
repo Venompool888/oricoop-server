@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace OriCoop.Authority
 {
@@ -70,6 +71,8 @@ namespace OriCoop.Authority
         // either append a generation ("p:<guid>#<gen>") or are released with FlagRelease.
         readonly Dictionary<string, int> claimed = new Dictionary<string, int>();
         readonly List<CsMessage> events = new List<CsMessage>();
+        readonly HashSet<ulong> kicked = new HashSet<ulong>();
+        string text = "";
         readonly ArbiterOptions options;
         readonly string code;
         uint lastEvent;
@@ -89,6 +92,53 @@ namespace OriCoop.Authority
         public bool IsOnline(int seat, double nowMs)
         {
             return seat >= 1 && seat <= 4 && seats[seat] != null && seats[seat].Online;
+        }
+
+        public CsRoomListEntry Listing()
+        {
+            CsRoomListEntry entry = new CsRoomListEntry { Code = code, Text = text };
+            // T-173: a seat without a name (no Steam on that PC) is listed as P<seat>, like the room page, not as "".
+            for (int s = 1; s <= 4; s++)
+                if (seats[s] != null && seats[s].Online)
+                { entry.Online++; entry.Nicks.Add(seats[s].Nick.Length > 0 ? seats[s].Nick : "P" + s); }
+            return entry;
+        }
+
+        // T-173: the longest text a Cs string can carry (u8 length + UTF-8).
+        public const int MaxTextBytes = 255;
+
+        // T-173: text kept by the server (room info, nicks) is cut to whole characters that fit MaxTextBytes once
+        // re-encoded, so a later CsRoster / CsRoomList can always be encoded (a too-long string made Encode throw and
+        // stopped the whole server). A lone surrogate counts as the 3-byte U+FFFD it is encoded as.
+        public static string ClampUtf8(string value, int maxBytes)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            if (Encoding.UTF8.GetByteCount(value) <= maxBytes) return value;
+            int bytes = 0, i = 0;
+            while (i < value.Length)
+            {
+                int length = char.IsHighSurrogate(value[i]) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]) ? 2 : 1;
+                int size = Encoding.UTF8.GetByteCount(value.Substring(i, length));
+                if (bytes + size > maxBytes) break;
+                bytes += size; i += length;
+            }
+            return value.Substring(0, i);
+        }
+
+        bool IsManager(int seat)
+        {
+            for (int s = 1; s <= 4; s++)
+                if (seats[s] != null && seats[s].Online) return ConnectionSeats(s).Contains(seat);
+            return false;
+        }
+
+        // T-173: SteamID 0 means "no Steam on that PC" (shared by every such client): it is never banned or matched.
+        bool IsKicked(CsMessage request)
+        {
+            if (request.Identities.Count == 0) return request.Steam != 0 && kicked.Contains(request.Steam);
+            foreach (CsIdentity identity in request.Identities)
+                if (identity.Steam != 0 && kicked.Contains(identity.Steam)) return true;
+            return false;
         }
 
         public bool IsIdle(double nowMs)
@@ -173,6 +223,7 @@ namespace OriCoop.Authority
             byte result = 0;
             if (request.Proto != 2 || request.Mode > 2 || request.Count < 1 || request.Count > 3 ||
                 (request.Identities.Count != request.Count && !(request.Count == 1 && request.Identities.Count == 0))) result = 3;
+            else if (request.Mode != 0 && IsKicked(request)) result = 5;
             else if (request.Mode == 2)
             {
                 string token = Convert.ToBase64String(request.Token);
@@ -195,7 +246,8 @@ namespace OriCoop.Authority
                     {
                         CsIdentity identity = request.Identities.Count == 0
                             ? new CsIdentity { Steam = request.Steam, Nick = request.Nick } : request.Identities[i];
-                        seats[owned[i]] = new SeatInfo { Token = token, Steam = identity.Steam, Nick = identity.Nick };
+                        seats[owned[i]] = new SeatInfo { Token = token, Steam = identity.Steam,
+                            Nick = ClampUtf8(identity.Nick, MaxTextBytes) };
                     }
                 }
             }
@@ -223,7 +275,7 @@ namespace OriCoop.Authority
                 for (int s = 1; s <= 4; s++) if (seats[s] == null) { free = s; break; }
                 if (free == 0) { Add(output, primary, Welcome(2, owned), nowMs); return output; }
                 seats[free] = new SeatInfo { Token = seats[primary].Token, Online = true,
-                    Steam = request.Steam, Nick = request.Nick };
+                    Steam = request.Steam, Nick = ClampUtf8(request.Nick, MaxTextBytes) };
             }
             else if (request.Target == 0)
             {
@@ -267,7 +319,7 @@ namespace OriCoop.Authority
             {
                 byte[] token = new byte[16];
                 lock (Random) Random.GetBytes(token);
-                info = new SeatInfo { Token = token, Steam = steam, Nick = nick };
+                info = new SeatInfo { Token = token, Steam = steam, Nick = ClampUtf8(nick, MaxTextBytes) };
                 seats[seat] = info;
             }
             info.Online = true;
@@ -326,7 +378,7 @@ namespace OriCoop.Authority
                 if (owned.Contains(pair.Value.Owner)) Handoff(pair.Key, pair.Value, output, nowMs);
             bool any = false;
             for (int s = 1; s <= 4; s++) if (IsOnline(s, nowMs)) any = true;
-            if (!any) emptyAt = nowMs;
+            if (!any) { emptyAt = nowMs; text = ""; }
             Roster(output, nowMs);
             return output;
         }
@@ -335,6 +387,24 @@ namespace OriCoop.Authority
         {
             List<Outgoing> output = new List<Outgoing>();
             if (!IsOnline(seat, nowMs)) return output;
+            if (request.Type == CsWire.CsRoomInfo)
+            {
+                if (IsManager(seat)) text = ClampUtf8(request.Text, MaxTextBytes);
+                return output;
+            }
+            if (request.Type == CsWire.CsKick)
+            {
+                List<int> target = ConnectionSeats(request.Target);
+                if (!IsManager(seat) || target.Count == 0 || target.Contains(seat))
+                {
+                    Add(output, seat, new CsMessage { Type = CsWire.CsError, ErrorCode = 2, Text = "cannot kick own or empty seat or not manager" }, nowMs);
+                    return output;
+                }
+                foreach (int s in target) if (seats[s].Steam != 0) kicked.Add(seats[s].Steam);   // T-173: never ban "no Steam" (0)
+                Add(output, PrimarySeat(target), new CsMessage { Type = CsWire.CsError, ErrorCode = 3, Text = "server.err.kicked" }, nowMs);
+                output.AddRange(ChangeSeat(target[0], new CsMessage { Type = CsWire.CsSeatRelease, Target = 0 }, nowMs));
+                return output;
+            }
             if (request.Type == CsWire.CsSeatAdd || request.Type == CsWire.CsSeatRelease)
                 return ChangeSeat(seat, request, nowMs);
             LeaseInfo lease;

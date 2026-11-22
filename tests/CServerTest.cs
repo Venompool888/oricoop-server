@@ -50,7 +50,7 @@ namespace OriCoop.CServer
                 byte[] bytes; bool reliable;
                 while (Peer.TryReceive(out bytes, out reliable))
                 {
-                    CsMessage message = bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsSeatRelease
+                    CsMessage message = bytes[0] >= CsWire.CsJoin && bytes[0] <= CsWire.CsKick
                         ? CsWire.Decode(bytes) : null;
                     Inbox.Add(new Received { Bytes = bytes, Reliable = reliable, Message = message });
                     if (message != null && message.Type == CsWire.CsWelcome) Welcome = message;
@@ -182,6 +182,173 @@ namespace OriCoop.CServer
             return lease && state;
         }
 
+        static void EmptyRoomListTest()
+        {
+            Client browser = Connect();
+            browser.Send(new byte[] { 189, 0 }, true);
+            Check("list_empty_server_before_join", Until(delegate { return browser.Count(190) == 1; }, 700)
+                && browser.Inbox[browser.Inbox.Count - 1].Bytes.Length == 3
+                && browser.Inbox[browser.Inbox.Count - 1].Bytes[2] == 0);
+            browser.Peer.Disconnect("done");
+        }
+
+        static void RoomManagementTests()
+        {
+            List<string> audit = new List<string>();
+            server.AuditSink = audit.Add;
+            Client a = Join(0, "", null, 2), b = Join(1, a.Welcome.Code, null, 2);
+            string code = a.Welcome.Code;
+            byte[] token = b.Welcome.Token;
+            ulong steam = b.Last(CsWire.CsRoster).Roster[2].Steam;
+            Client browser = Connect();
+            a.Send(new CsMessage { Type = CsWire.CsRoomInfo, Seat = 2, Text = "沉没林地 6%" });
+            RunFor(30);
+            browser.Send(new CsMessage { Type = CsWire.CsList });
+            bool listed = Until(delegate { return browser.Last(CsWire.CsRoomList) != null; }, 700);
+            CsRoomListEntry entry = listed ? browser.Last(CsWire.CsRoomList).Rooms.Find(delegate(CsRoomListEntry r) { return r.Code == code; }) : null;
+            Check("list_before_join_code_online_nicks_manager_text", entry != null && entry.Online == 4 && entry.Capacity == 4
+                && String.Join(",", entry.Nicks.ToArray()) == "player0,player1,player0,player1" && entry.Text == "沉没林地 6%");
+            b.Send(new CsMessage { Type = CsWire.CsRoomInfo, Text = "ignored" });
+            RunFor(30);
+            browser.Inbox.Clear(); browser.Send(new CsMessage { Type = CsWire.CsList });
+            Check("room_info_nonmanager_ignored", Until(delegate { return browser.Last(CsWire.CsRoomList) != null; }, 700)
+                && browser.Last(CsWire.CsRoomList).Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code && r.Text == "沉没林地 6%"; }));
+            a.Send(new CsMessage { Type = CsWire.CsList });
+            Check("list_inside_room", Until(delegate { return a.Last(CsWire.CsRoomList) != null; }, 700));
+            browser.Send(new CsMessage { Type = CsWire.CsJoin, Mode = 0, Steam = 9001, Nick = "browser" });
+            Check("list_then_join_same_connection", Until(delegate { return browser.Welcome != null; }, 700)
+                && browser.Welcome.Result == 0 && browser.Welcome.AssignedSeat == 1);
+
+            Clear();
+            for (byte id = CsWire.CsJoin; id <= CsWire.CsKick; id++)
+                a.Send(new CsMessage { Type = CsWire.CsTo, Target = 3, Inner = CsWire.Encode(new CsMessage { Type = id, Seat = 1 }) });
+            RunFor(40);
+            Check("cs_to_blocks_all_control_ids_176_192", b.Inbox.Count == 0 && b.Peer.State == PeerState.Connected);
+            b.Send(new CsMessage { Type = CsWire.CsKick, Target = 1 });
+            bool denied = Until(delegate { return b.Last(CsWire.CsError) != null; }, 700);
+            a.Send(new CsMessage { Type = CsWire.CsList });
+            bool unchanged = Until(delegate { return a.Last(CsWire.CsRoomList) != null; }, 700)
+                && a.Last(CsWire.CsRoomList).Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code && r.Online == 4 && r.Nicks.Count == 4; });
+            Check("kick_nonmanager_error2_roster_unchanged", denied && b.Last(CsWire.CsError).ErrorCode == 2
+                && unchanged && a.Count(CsWire.CsRoster) == 0 && b.Count(CsWire.CsRoster) == 0);
+            a.Send(new CsMessage { Type = CsWire.CsKick, Target = 2 });
+            bool own = Until(delegate { return a.Count(CsWire.CsError) == 1; }, 700);
+            a.Send(new CsMessage { Type = CsWire.CsList });
+            bool ownUnchanged = Until(delegate { return a.Count(CsWire.CsRoomList) == 2; }, 700)
+                && a.Last(CsWire.CsRoomList).Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code && r.Online == 4 && r.Nicks.Count == 4; });
+            Check("kick_own_seat_error2", own && ownUnchanged && a.Last(CsWire.CsError).ErrorCode == 2
+                && a.Count(CsWire.CsRoster) == 0 && b.Count(CsWire.CsRoster) == 0);
+            a.Send(new CsMessage { Type = CsWire.CsKick, Seat = 2, Target = 4 });
+            bool kicked = Until(delegate { return b.Last(CsWire.CsError) != null && b.Last(CsWire.CsError).ErrorCode == 3
+                && a.Last(CsWire.CsRoster) != null && a.Last(CsWire.CsRoster).Roster.Count == 2; }, 700);
+            Check("kick_manager_secondary_frees_target_device", kicked && b.Last(CsWire.CsError).Text == "server.err.kicked"
+                && Online(a, 1, true, 2) && Online(a, 2, true, 2));
+            Check("kick_flushes_error_then_closes", Until(delegate { return b.Peer.State == PeerState.Disconnected; }, 700));
+            foreach (byte mode in new byte[] { 2, 1 })
+            {
+                Client blocked = Connect();
+                blocked.Send(new CsMessage { Type = CsWire.CsJoin, Mode = mode, Code = code, Token = token, Steam = steam, Nick = "blocked" });
+                Check(mode == 2 ? "kick_token_rejoin_result5" : "kick_same_steam_fresh_join_result5",
+                    Until(delegate { return blocked.Welcome != null; }, 700) && blocked.Welcome.Result == 5 && blocked.Welcome.Seats.Count == 0);
+            }
+            Client secondIdentity = Connect();
+            secondIdentity.Send(new CsMessage { Type = CsWire.CsJoin, Mode = 1, Code = code, Steam = steam + 1, Nick = "second" });
+            Check("kick_bans_every_device_steam", Until(delegate { return secondIdentity.Welcome != null; }, 700) && secondIdentity.Welcome.Result == 5);
+            Check("kick_audit_identity_and_refusal", FindLine(audit.ToArray(), "kick", "ip=127.0.0.1:" + b.Socket.LocalPort + " ",
+                "room=" + code + " ", "seats=3,4 ", "steam=" + steam + ",", "nick=\"player0\",\"player1\"", "reason=\"by seat 2\"") != null
+                && FindLine(audit.ToArray(), "join_refused", "reason=\"kicked\"") != null
+                && FindLine(audit.ToArray(), "rejoin_refused", "reason=\"kicked\"") != null);
+            a.Send(new CsMessage { Type = CsWire.CsKick, Target = 4 });
+            Check("kick_empty_seat_error2", Until(delegate { return a.Count(CsWire.CsError) == 2; }, 700) && a.Last(CsWire.CsError).ErrorCode == 2);
+            Client next = Join(1, code, null);
+            a.Send(new CsMessage { Type = CsWire.CsSeatRelease, Target = 0 });
+            Until(delegate { return Online(next, 3, true, 1); }, 700);
+            next.Send(new CsMessage { Type = CsWire.CsRoomInfo, Text = "new manager" });
+            RunFor(30);
+            browser.Send(new CsMessage { Type = CsWire.CsList });
+            Check("room_info_next_lowest_online_manager", Until(delegate { return browser.Last(CsWire.CsRoomList) != null
+                && browser.Last(CsWire.CsRoomList).Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code && r.Text == "new manager" && r.Online == 1; }); }, 700));
+            next.Peer.Disconnect("empty"); RunFor(30);
+            browser.Send(new CsMessage { Type = CsWire.CsList });
+            Check("list_skips_empty_held_room", Until(delegate { return !browser.Last(CsWire.CsRoomList).Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code; }); }, 700));
+            server.AuditSink = null;
+        }
+
+        // A step that throws (the server process would exit) fails the check instead of ending the run.
+        static bool Survives(int ms)
+        {
+            try { RunFor(ms); return true; }
+            catch (Exception e)
+            {
+                if (e.Message == "test deadline") throw;
+                Console.WriteLine("server step threw " + e.GetType().Name + ": " + e.Message);
+                return false;
+            }
+        }
+
+        static bool Listed(Client c, string code)
+        {
+            CsMessage list = c.Last(CsWire.CsRoomList);
+            return list != null && list.Rooms.Exists(delegate(CsRoomListEntry r) { return r.Code == code; });
+        }
+
+        // T-173 (review F10, F11, F12, F13): what any UDP client can send must not stop the server or flood its memory,
+        // and rooms without a published room info text stay off the list.
+        static void HostileClientTests()
+        {
+            Client raw = Connect();
+            raw.Send(new byte[] { CsWire.CsList, 0, 0 }, true);
+            Check("list_with_trailing_bytes_keeps_server_running", Survives(80)
+                && Until(delegate { return raw.Count(CsWire.CsRoomList) == 1; }, 700));
+            Client member = Join(0, "", null);
+            member.Send(new byte[] { CsWire.CsKick, member.Welcome.AssignedSeat, 4, 0 }, true);
+            bool kickSurvived = Survives(80);
+            Client other = Join(0, "", null);
+            other.Send(new byte[] { CsWire.CsRoomList, other.Welcome.AssignedSeat, 65 }, true);
+            bool listSurvived = Survives(80);
+            Check("malformed_in_room_messages_close_only_that_connection", kickSurvived && listSurvived
+                && Until(delegate { return member.Peer.State == PeerState.Disconnected && other.Peer.State == PeerState.Disconnected; }, 1500));
+
+            Client manager = Join(0, "", null);
+            string code = manager.Welcome.Code;
+            byte[] info = new byte[3 + 255];
+            info[0] = CsWire.CsRoomInfo; info[1] = manager.Welcome.AssignedSeat; info[2] = 255;
+            for (int i = 3; i < info.Length; i++) info[i] = 0xFF;
+            manager.Send(info, true);
+            bool infoSurvived = Survives(80);
+            Client browser = Connect();
+            browser.Send(new CsMessage { Type = CsWire.CsList });
+            bool answered = Until(delegate { return browser.Last(CsWire.CsRoomList) != null; }, 700);
+            Check("invalid_utf8_room_info_keeps_server_and_list_working", infoSurvived && Survives(20) && answered && !Listed(browser, code));
+
+            Client privateRoom = Join(0, "", null);
+            browser.Inbox.Clear(); browser.Send(new CsMessage { Type = CsWire.CsList });
+            bool hidden = Until(delegate { return browser.Last(CsWire.CsRoomList) != null; }, 700) && !Listed(browser, privateRoom.Welcome.Code);
+            privateRoom.Send(new CsMessage { Type = CsWire.CsRoomInfo, Text = "public now" });
+            RunFor(30);
+            browser.Inbox.Clear(); browser.Send(new CsMessage { Type = CsWire.CsList });
+            Check("list_only_rooms_with_room_info", hidden && Until(delegate { return Listed(browser, privateRoom.Welcome.Code); }, 700));
+
+            double interval = server.ListIntervalMs, close = server.ListCloseMs;
+            server.ListIntervalMs = 1000; server.ListCloseMs = 400;
+            Client flood = Connect();
+            byte[] request = CsWire.Encode(new CsMessage { Type = CsWire.CsList });
+            for (int i = 0; i < 50; i++) flood.Send(request, false);
+            RunFor(300);
+            Check("list_rate_limited_per_endpoint", flood.Count(CsWire.CsRoomList) == 1);
+            Check("list_only_connection_closed_after_reply", Until(delegate { return flood.Peer.State == PeerState.Disconnected; }, 1500));
+            Client again = Connect();
+            again.Send(request, true);
+            bool first = Until(delegate { return again.Count(CsWire.CsRoomList) == 1; }, 700);
+            server.ListCloseMs = 3000;
+            RunFor(1050);
+            again.Send(request, true);
+            Check("list_allowed_again_after_interval", first && Until(delegate { return again.Count(CsWire.CsRoomList) == 2; }, 700));
+            server.ListIntervalMs = interval; server.ListCloseMs = close;
+            foreach (Client c in new Client[] { raw, manager, browser, privateRoom, again }) c.Peer.Disconnect("done");
+            RunFor(30);
+        }
+
         static void UdpTests()
         {
             Client a = Join(0, "", null);
@@ -311,7 +478,7 @@ namespace OriCoop.CServer
             invalidFirst.Send(new byte[] { 1, 4 }, true);
             bool error = Until(delegate { return invalidFirst.Count(CsWire.CsError) == 1; }, 700);
             bool closed = Until(delegate { return invalidFirst.Peer.State == PeerState.Disconnected; }, 700);
-            Check("first_message_join_required", error && closed);
+            Check("first_message_join_or_list_required", error && closed);
             Client proto = Connect();
             proto.Send(new CsMessage { Type = CsWire.CsJoin, Proto = 1, Mode = 0 });
             Check("protocol_mismatch", Until(delegate { return proto.Welcome != null; }, 700) && proto.Welcome.Result == 3);
@@ -533,6 +700,93 @@ namespace OriCoop.CServer
             bytes = CsWire.Encode(join); bytes[21] = 4;
             try { CsWire.Decode(bytes); } catch (System.IO.InvalidDataException) { invalidCount = true; }
             Check("wire_v2_invalid_count_rejected", invalidCount);
+            bool newTypes = true;
+            for (byte id = CsWire.CsList; id <= CsWire.CsKick; id++)
+            {
+                CsMessage m = new CsMessage { Type = id, Seat = 2, Text = "说明", Target = 4 };
+                CsRoomListEntry room = new CsRoomListEntry { Code = "234567", Online = 2, Capacity = 4, Text = "说明" };
+                room.Nicks.Add("甲"); room.Nicks.Add("乙"); m.Rooms.Add(room);
+                byte[] encoded = CsWire.Encode(m);
+                newTypes &= Convert.ToBase64String(encoded) == Convert.ToBase64String(CsWire.Encode(CsWire.Decode(encoded)));
+                if (id == CsWire.CsList) newTypes &= encoded.Length == 2;
+                if (id == CsWire.CsKick) newTypes &= encoded.Length == 3 && encoded[2] == 4;
+                if (id == CsWire.CsRoomList)
+                {
+                    CsRoomListEntry r = CsWire.Decode(encoded).Rooms[0];
+                    newTypes &= r.Code == room.Code && r.Online == 2 && r.Capacity == 4 && r.Text == "说明"
+                        && String.Join(",", r.Nicks.ToArray()) == "甲,乙";
+                }
+            }
+            Check("wire_four_room_messages_roundtrip_layout", newTypes);
+            CsMessage many = new CsMessage { Type = CsWire.CsRoomList };
+            for (int i = 0; i < 65; i++) many.Rooms.Add(new CsRoomListEntry { Code = i.ToString() });
+            Check("wire_room_list_capped64", CsWire.Decode(CsWire.Encode(many)).Rooms.Count == 64);
+            bool longText = false;
+            try { CsWire.Encode(new CsMessage { Type = CsWire.CsRoomInfo, Text = new string('门', 86) }); }
+            catch (ArgumentException) { longText = true; }
+            Check("wire_room_info_utf8_limit", longText);
+            // T-173: invalid UTF-8 is a malformed message (it used to decode to U+FFFD, 3 bytes each, and the server's
+            // later re-encode of that text threw outside its catch).
+            bool invalidUtf8 = false;
+            try { CsWire.Decode(new byte[] { CsWire.CsRoomInfo, 0, 3, 0xFF, 0xFE, 0xFF }); }
+            catch (System.IO.InvalidDataException) { invalidUtf8 = true; }
+            Check("wire_invalid_utf8_rejected", invalidUtf8 && CsWire.Decode(CsWire.Encode(
+                new CsMessage { Type = CsWire.CsRoomInfo, Text = "门\U0001F600" })).Text == "门\U0001F600");
+        }
+
+        // T-173 (review F01/F09, F12, F16): Arbiter rules for clients without Steam (SteamID 0) and for server-kept text.
+        static void HardeningLogicTests()
+        {
+            Arbiter room = new Arbiter("ZERO00", new ArbiterOptions { SeatHoldMs = 60000 }, 0);
+            int seat; byte[] welcome;
+            byte[][] tokens = new byte[5][];
+            for (int i = 1; i <= 3; i++)
+            {
+                CsMessage join = new CsMessage { Type = CsWire.CsJoin, Mode = 1, Code = "ZERO00" };
+                join.Identities.Add(new CsIdentity { Steam = 0, Nick = "" });
+                room.Join(join, i, out seat, out welcome);
+                tokens[seat] = CsWire.Decode(welcome).Token;
+            }
+            CsRoomListEntry listing = room.Listing();
+            Check("list_nameless_seats_as_p_seat", String.Join(",", listing.Nicks.ToArray()) == "P1,P2,P3");
+            bool kickedThree = false;
+            foreach (Outgoing o in room.Handle(1, new CsMessage { Type = CsWire.CsKick, Target = 3 }, 10))
+            {
+                CsMessage m = CsWire.Decode(o.Message);
+                if (m.Type == CsWire.CsError && m.ErrorCode == 3 && o.To == 3) kickedThree = true;
+            }
+            CsMessage fresh = new CsMessage { Type = CsWire.CsJoin, Mode = 1, Code = "ZERO00" };
+            fresh.Identities.Add(new CsIdentity { Steam = 0, Nick = "" });
+            room.Join(fresh, 11, out seat, out welcome);
+            Check("kick_steam0_does_not_ban_other_steamless_joins", kickedThree && seat == 3 && CsWire.Decode(welcome).Result == 0);
+            room.Offline(2, 12);
+            room.Join(new CsMessage { Type = CsWire.CsJoin, Mode = 2, Code = "ZERO00", Token = tokens[2] }, 13, out seat, out welcome);
+            Check("kick_steam0_does_not_ban_token_rejoin", seat == 2 && CsWire.Decode(welcome).Result == 0);
+
+            // Text kept by the server is clamped to 255 UTF-8 bytes, so the room list and roster always encode.
+            Arbiter text = new Arbiter("TEXT00", new ArbiterOptions(), 0);
+            bool nickOk = true, infoOk = true;
+            try
+            {
+                CsMessage join = new CsMessage { Type = CsWire.CsJoin };
+                join.Identities.Add(new CsIdentity { Steam = 5, Nick = new string('\uFFFD', 200) });
+                text.Join(join, 0, out seat, out welcome);
+                text.Handle(seat, new CsMessage { Type = CsWire.CsSeatAdd, Steam = 6, Nick = new string('\uFFFD', 255) }, 1);
+            }
+            catch (ArgumentException) { nickOk = false; }
+            try
+            {
+                text.Handle(1, new CsMessage { Type = CsWire.CsRoomInfo, Text = new string('\uFFFD', 255) }, 2);
+                CsMessage list = new CsMessage { Type = CsWire.CsRoomList };
+                list.Rooms.Add(text.Listing());
+                CsRoomListEntry back = CsWire.Decode(CsWire.Encode(list)).Rooms[0];
+                infoOk = back.Text.Length == 85 && back.Nicks.Count == 2 && back.Nicks[1].Length == 85;
+            }
+            catch (ArgumentException) { infoOk = false; }
+            Check("server_text_clamped_nicks_encode", nickOk);
+            Check("server_text_clamped_room_info_encodes", infoOk);
+            Check("clamp_utf8_whole_characters", Arbiter.ClampUtf8("a\U0001F600", 4) == "a" && Arbiter.ClampUtf8("门门", 5) == "门"
+                && Arbiter.ClampUtf8("abc", 255) == "abc" && Arbiter.ClampUtf8(null, 10) == "");
         }
 
         static CsMessage GapAction(uint seq, byte flags, string key)
@@ -858,7 +1112,7 @@ namespace OriCoop.CServer
             invalidFirst.Send(new byte[] { 1, 4 }, true);
             bool error = Until(delegate { return invalidFirst.Count(CsWire.CsError) == 1; }, wait);
             bool closed = Until(delegate { return invalidFirst.Peer.State == PeerState.Disconnected; }, wait);
-            Check("r_first_message_join_required", error && closed);
+            Check("r_first_message_join_or_list_required", error && closed);
             Client proto = Connect();
             proto.Send(new CsMessage { Type = CsWire.CsJoin, Proto = 1, Mode = 0 });
             Check("r_protocol_mismatch", Until(delegate { return proto.Welcome != null; }, wait) && proto.Welcome.Result == 3);
@@ -953,13 +1207,20 @@ namespace OriCoop.CServer
                 }
                 else
                 {
-                    WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests(); LeaveLogicTests();
+                    WireTests(); LogicTests(); GapTests(); MultiSeatLogicTests(); LeaveLogicTests(); HardeningLogicTests();
+                    // Connection logging on (oricoop-server PR #3 made it opt-in): RoomManagementTests checks the kick and
+                    // kicked-refusal audit lines; AuditDisabledTests checks the default (off) on its own server.
                     server = new CServer(new ArbiterOptions { SeatHoldMs = 1500, ActiveWindowMs = 300,
-                        MinHoldMs = 500, RoomIdleMs = 1500 });
+                        MinHoldMs = 500, RoomIdleMs = 1500 }, null, logConnections: true);
+                    server.AuditSink = null;   // T-170: audit lines are checked in AuditTests / RoomManagementTests; keep this output readable
+                    server.ListIntervalMs = 0;   // T-173: the room tests list several times a second; HostileClientTests checks the limit
                     server.Start(0);
+                    EmptyRoomListTest();
                     UdpTests();
                     StaleSessionTests();
                     MultiSeatTests();
+                    RoomManagementTests();
+                    HostileClientTests();
                     AuditDisabledTests();
                     AuditTests();
                     IdleTests();

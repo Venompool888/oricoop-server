@@ -2,8 +2,8 @@
 
 You are an AI agent asked to build, test or deploy this server for a human. Follow this file in order.
 
-**First, tell the human the stage:** this is **experimental**. It matches the OriCoop client release v0.2.2-2026.11.21
-(menu: Your Own Server / 自建服务器). In v0.2.2, online play is a LAN host or this server (the tunnel relay was removed,
+**First, tell the human the stage:** this is **experimental**. It matches the OriCoop client release v0.2.4-2026.11.22
+(menu: Your Own Server / 自建服务器). In v0.2.4, online play is a LAN host or this server (the tunnel relay was removed,
 T-159); server-mode gameplay sync is still partly done. Server and client must come from the same release tag. The
 connection log is off by default. If enabled, it records players' IP addresses, SteamIDs and nicknames (README, Privacy).
 Tell the human to inform their players if they enable it.
@@ -26,7 +26,7 @@ OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 
 ## 1. Ask the human first
 
-1. Do they understand it is experimental, and which OriCoop client release do their players use? (Must be v0.2.2-2026.11.21.)
+1. Do they understand it is experimental, and which OriCoop client release do their players use? (Must be v0.2.4-2026.11.22.)
 2. Where: SSH host / user (sudo?), or "this machine".
 3. Port: UDP 47022 unless they want another.
 4. Install method: systemd + .NET 8 (default) or Docker.
@@ -183,7 +183,7 @@ and a public IPv4 (no CGNAT).
 
 | Symptom | Cause / fix |
 |---|---|
-| Client cannot connect / version error | Client and server must be the same release tag (v0.2.2-2026.11.21). Older clients have no server mode. |
+| Client cannot connect / version error | Client and server must be the same release tag (v0.2.4-2026.11.22). Older clients have no server mode; v0.2.4 clients need a v0.2.4 server for the room list, room page and kick. |
 | Opened TCP 47022 | The server is UDP only. |
 | Docker `COPY failed` | Build context must be the repo root: `docker build -f server/Dockerfile .` |
 | Unit fails with 203/EXEC | Wrong dotnet path in `ExecStart=`. |
@@ -195,4 +195,4 @@ and a public IPv4 (no CGNAT).
 
 Address and port (`host:47022`), install method and paths, firewall changes made and any left for them, service status
 and the listening line, where the logs are, whether connection logging is enabled, how to upgrade / roll back, and
-which client release (v0.2.2-2026.11.21) players need.
+which client release (v0.2.4-2026.11.22) players need.

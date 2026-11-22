@@ -31,6 +31,7 @@ $clientSources = @(
     (Join-Path $here 'shared\AuthorityClient.cs')
     (Join-Path $here 'shared\INetRouteServer.cs')
     (Join-Path $here 'shared\CServerClient.cs')
+    (Join-Path $here 'shared\CServerRoomList.cs')
 )
 $serverExe = Join-Path $here 'server\CServer.exe'
 $testExe = Join-Path $here 'tests\CServerTest.exe'
@@ -62,7 +63,7 @@ if ($GameManaged -ne '') {
     $net35Out = Join-Path $env:TEMP 'oricoop-authority-net35.dll'
     & $csc /nologo /noconfig /nostdlib+ /target:library /langversion:5 "/out:$net35Out" `
         "/r:$GameManaged\mscorlib.dll" "/r:$GameManaged\System.dll" "/r:$GameManaged\System.Core.dll" `
-        @authoritySources (Join-Path $here 'shared\INetRouteServer.cs') (Join-Path $here 'shared\CServerClient.cs') `
+        @authoritySources (Join-Path $here 'shared\INetRouteServer.cs') (Join-Path $here 'shared\CServerClient.cs') (Join-Path $here 'shared\CServerRoomList.cs') `
         (Join-Path $here 'shared\net\NetPeer.cs') (Join-Path $here 'shared\net\Transport.cs')
     if ($LASTEXITCODE -ne 0) { throw 'shared\ does not compile against .NET 3.5' }
 }

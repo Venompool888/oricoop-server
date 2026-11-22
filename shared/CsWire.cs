@@ -19,6 +19,13 @@ namespace OriCoop.Authority
         public string Nick = "";
     }
 
+    public sealed class CsRoomListEntry
+    {
+        public string Code = "", Text = "";
+        public byte Online, Capacity = 4;
+        public readonly List<string> Nicks = new List<string>();
+    }
+
     public sealed class CsLeaseEntry
     {
         public string Key = "";
@@ -46,6 +53,7 @@ namespace OriCoop.Authority
         public readonly List<CsIdentity> Identities = new List<CsIdentity>();
         public readonly List<int> Seats = new List<int>();
         public readonly List<CsRosterEntry> Roster = new List<CsRosterEntry>();
+        public readonly List<CsRoomListEntry> Rooms = new List<CsRoomListEntry>();
         public readonly List<CsLeaseEntry> Leases = new List<CsLeaseEntry>();
         public readonly List<CsStateEntry> States = new List<CsStateEntry>();
     }
@@ -56,6 +64,7 @@ namespace OriCoop.Authority
         public const byte CsGrant = 180, CsAction = 181, CsEvent = 182, CsState = 183;
         public const byte CsSnapshot = 184, CsError = 185, CsTo = 186;
         public const byte CsSeatAdd = 187, CsSeatRelease = 188;
+        public const byte CsList = 189, CsRoomList = 190, CsRoomInfo = 191, CsKick = 192;
 
         static void WriteString(BinaryWriter w, string value)
         {
@@ -71,7 +80,15 @@ namespace OriCoop.Authority
             return bytes;
         }
 
-        static string ReadString(BinaryReader r) { return Encoding.UTF8.GetString(ReadBytes(r, r.ReadByte())); }
+        // T-173: strict UTF-8. Invalid bytes used to become U+FFFD (3 bytes each), so a 255-byte string could grow past
+        // 255 bytes and make the server's own re-encode throw later; now the message is rejected as malformed.
+        static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
+        static string ReadString(BinaryReader r)
+        {
+            byte[] bytes = ReadBytes(r, r.ReadByte());
+            try { return StrictUtf8.GetString(bytes); }
+            catch (ArgumentException) { throw new InvalidDataException("invalid UTF-8 in Cs string"); }
+        }
         static void WriteData(BinaryWriter w, byte[] data)
         {
             if (data.Length > UInt16.MaxValue) throw new ArgumentException("blob exceeds 65535 bytes");
@@ -158,6 +175,22 @@ namespace OriCoop.Authority
                         w.Write(m.Target); w.Write(m.Inner); break;
                     case CsSeatAdd:
                         w.Write(m.Steam); WriteString(w, m.Nick); break;
+                    case CsList: break;
+                    case CsRoomList:
+                        int roomCount = Math.Min(64, m.Rooms.Count);
+                        w.Write((byte)roomCount);
+                        for (int i = 0; i < roomCount; i++)
+                        {
+                            CsRoomListEntry room = m.Rooms[i];
+                            WriteString(w, room.Code); w.Write(room.Online); w.Write(room.Capacity);
+                            w.Write((byte)room.Nicks.Count);
+                            foreach (string nick in room.Nicks) WriteString(w, nick);
+                            WriteString(w, room.Text);
+                        }
+                        break;
+                    case CsRoomInfo:
+                        WriteString(w, m.Text); break;
+                    case CsKick:
                     case CsSeatRelease:
                         w.Write(m.Target); break;
                     default: throw new InvalidDataException("unknown Cs message");
@@ -227,6 +260,21 @@ namespace OriCoop.Authority
                         m.Target = r.ReadByte(); m.Inner = ReadBytes(r, (int)(stream.Length - stream.Position)); break;
                     case CsSeatAdd:
                         m.Steam = r.ReadUInt64(); m.Nick = ReadString(r); break;
+                    case CsList: break;
+                    case CsRoomList:
+                        int roomCount = r.ReadByte();
+                        if (roomCount > 64) throw new InvalidDataException("room list too large");
+                        for (int i = 0; i < roomCount; i++)
+                        {
+                            CsRoomListEntry room = new CsRoomListEntry { Code = ReadString(r), Online = r.ReadByte(), Capacity = r.ReadByte() };
+                            int nickCount = r.ReadByte();
+                            for (int j = 0; j < nickCount; j++) room.Nicks.Add(ReadString(r));
+                            room.Text = ReadString(r); m.Rooms.Add(room);
+                        }
+                        break;
+                    case CsRoomInfo:
+                        m.Text = ReadString(r); break;
+                    case CsKick:
                     case CsSeatRelease:
                         m.Target = r.ReadByte(); break;
                     default: throw new InvalidDataException("unknown Cs message");
