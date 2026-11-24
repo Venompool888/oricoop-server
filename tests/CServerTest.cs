@@ -182,6 +182,96 @@ namespace OriCoop.CServer
             return lease && state;
         }
 
+        // Exercise the loopback side of the TLS proxy with grants from actual UDP welcomes.
+        static int DiagnosticRequest(string url, string key, string body, out string reply)
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Proxy = null; request.Timeout = 2000; request.ReadWriteTimeout = 2000;
+            request.Headers["X-OriCoop-Join"] = key;
+            if (body != null)
+            {
+                request.Method = "POST"; request.ContentType = "application/x-www-form-urlencoded";
+                byte[] content = System.Text.Encoding.UTF8.GetBytes(body);
+                request.ContentLength = content.Length;
+                using (Stream stream = request.GetRequestStream()) stream.Write(content, 0, content.Length);
+            }
+            HttpWebResponse response;
+            try { response = (HttpWebResponse)request.GetResponse(); }
+            catch (WebException ex) { response = ex.Response as HttpWebResponse; if (response == null) throw; }
+            using (response)
+            using (var reader = new StreamReader(response.GetResponseStream()))
+            {
+                reply = reader.ReadToEnd();
+                return (int)response.StatusCode;
+            }
+        }
+
+        static void JoinDiagnosticsTests()
+        {
+            string parent = Path.Combine(Path.GetTempPath(), "ori-diag-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(parent);
+            var socket = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+            socket.Start(); int port = ((IPEndPoint)socket.LocalEndpoint).Port; socket.Stop();
+            string url = "http://127.0.0.1:" + port + JoinDiagnosticsReceiver.Route;
+            DateTime now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Utc);
+            using (var receiver = new JoinDiagnosticsReceiver(parent, 7, delegate { return now; }))
+            try
+            {
+                receiver.Start(port); server.Diagnostics = receiver;
+                string reply;
+                byte[] missing = new byte[16];
+                string unknown = JoinDiagnosticsKey.RequestId(missing);
+                Check("diagnostics_requires_join", DiagnosticRequest(url, unknown, null, out reply) == 404);
+                Client host = Join(0, "", null);
+                Client member = Join(1, host.Welcome.Code, null);
+                string key = JoinDiagnosticsKey.RequestId(member.Welcome.Token);
+                // A player can quit while their report is in flight. The grant remains
+                // available after an incomplete body and the game server keeps running.
+                using (var interrupted = new System.Net.Sockets.TcpClient())
+                {
+                    interrupted.Connect(IPAddress.Loopback, port);
+                    string partial = "POST " + JoinDiagnosticsReceiver.Route + " HTTP/1.1\r\nHost: 127.0.0.1:" + port +
+                        "\r\nX-OriCoop-Join: " + key + "\r\nContent-Type: application/x-www-form-urlencoded\r\n" +
+                        "Content-Length: 64\r\nConnection: close\r\n\r\nv=1";
+                    byte[] bytes = System.Text.Encoding.ASCII.GetBytes(partial);
+                    interrupted.GetStream().Write(bytes, 0, bytes.Length);
+                }
+                Check("diagnostics_join_capability", DiagnosticRequest(url, key, null, out reply) == 200 &&
+                    reply == JoinDiagnosticsKey.Capability(member.Welcome.Token));
+                string fields = "v=1&os=10.0.1&arch=x64&systemLang=fr-FR&gameLang=English&timezone=Romance+Standard+Time" +
+                    "&utcOffset=60&gameFs=NTFS&gameFree=ge50GiB&saveFs=NTFS&saveFree=lt1GiB";
+                string success = fields + "&probe=ok&provider=ipify&ip=" + new IPAddress(new byte[] { 1, 1, 1, 1 });
+                Check("diagnostics_rejects_extra_and_repeated_fields",
+                    DiagnosticRequest(url, key, success + "&identity=test", out reply) == 400 &&
+                    DiagnosticRequest(url, key, success + "&probe=ok", out reply) == 400);
+                Check("diagnostics_rejects_oversized", DiagnosticRequest(url, key, new string('x', 2049), out reply) == 413);
+                Check("diagnostics_complete_report", DiagnosticRequest(url, key, success, out reply) == 204);
+                Check("diagnostics_spent_grant", DiagnosticRequest(url, key, success, out reply) == 404);
+                string failed = "v=1&systemLang=fr-FR&probe=failed";
+                string hostKey = JoinDiagnosticsKey.RequestId(host.Welcome.Token);
+                Check("diagnostics_failed_probe_has_no_ip", DiagnosticRequest(url, hostKey, failed + "&ip=127.0.0.1", out reply) == 400 &&
+                    DiagnosticRequest(url, hostKey, failed, out reply) == 204);
+                string directory = Path.Combine(parent, "join-reports");
+                string path = Directory.GetFiles(directory, "*.form")[0];
+                string[] lines = File.ReadAllLines(path);
+                Check("diagnostics_combined_private_record", lines.Length == 2 && lines[0] == success.Replace("+", "%20") && lines[1] == failed);
+                receiver.RegisterJoin(missing); now = now.AddMinutes(3);
+                Check("diagnostics_grant_expires", DiagnosticRequest(url, unknown, null, out reply) == 404);
+                bool limited = true;
+                for (int i = 0; i <= 60; i++)
+                {
+                    missing[0] = (byte)i; receiver.RegisterJoin(missing);
+                    int status = DiagnosticRequest(url, JoinDiagnosticsKey.RequestId(missing), failed, out reply);
+                    if (status != (i == 60 ? 429 : 204)) limited = false;
+                }
+                Check("diagnostics_rate_limit", limited);
+                string unrelated = Path.Combine(directory, "notes.txt"); File.WriteAllText(unrelated, "keep");
+                now = now.AddDays(7); receiver.Prune();
+                Check("diagnostics_retention", !File.Exists(path) && File.Exists(unrelated));
+            }
+            finally { server.Diagnostics = null; Directory.Delete(parent, true); }
+        }
+
         static void EmptyRoomListTest()
         {
             Client browser = Connect();
@@ -1224,6 +1314,7 @@ namespace OriCoop.CServer
                     AuditDisabledTests();
                     AuditTests();
                     IdleTests();
+                    JoinDiagnosticsTests();
                 }
             }
             catch (Exception ex) { Check("unexpected_exception", false); Console.WriteLine(ex); }

@@ -125,6 +125,7 @@ namespace OriCoop.CServer
         readonly ArbiterOptions options;
         readonly string logDirectory;
         readonly bool logConnections;
+        internal JoinDiagnosticsReceiver Diagnostics;
         // T-162: when each dropped endpoint was last told its session is gone (at most one Goodbye per 250 ms each).
         readonly Dictionary<EndPoint, double> staleReplies = new Dictionary<EndPoint, double>();
         ServerSocket socket;
@@ -451,6 +452,7 @@ namespace OriCoop.CServer
                 }
                 connection.Room = room; connection.Seats = room.Arbiter.ConnectionSeats(seat);
                 room.Members.Add(connection);
+                if (Diagnostics != null) Diagnostics.RegisterJoin(CsWire.Decode(welcome).Token);
                 if (logConnections)
                 {
                     connection.AuditRoom = room.Code; connection.AuditSeats = AuditSeatList(connection.Seats);
@@ -674,25 +676,50 @@ namespace OriCoop.CServer
                 string log = Environment.GetEnvironmentVariable("ORICOOP_CSERVER_LOG_DIR");
                 if (String.IsNullOrEmpty(log)) log = Environment.GetEnvironmentVariable("LOGS_DIRECTORY");
                 if (String.IsNullOrEmpty(log)) log = null;
+                string diagPort = Environment.GetEnvironmentVariable("ORICOOP_DIAGNOSTICS_PORT");
+                string diagDir = Environment.GetEnvironmentVariable("ORICOOP_DIAGNOSTICS_DIR");
+                string diagDays = Environment.GetEnvironmentVariable("ORICOOP_DIAGNOSTICS_DAYS") ?? "7";
                 bool? logConnections = null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     if (args[i] == "--port") port = Int32.Parse(args[++i]);
                     else if (args[i] == "--log") log = args[++i];
+                    else if (args[i] == "--diagnostics-port") diagPort = args[++i];
+                    else if (args[i] == "--diagnostics-dir") diagDir = args[++i];
+                    else if (args[i] == "--diagnostics-days") diagDays = args[++i];
                     else if (args[i] == "--log-connections") logConnections = true;
                     else if (args[i] == "--no-log-connections") logConnections = false;
                     else throw new ArgumentException(
-                        "usage: CServer [--port 47022] [--log directory] [--log-connections|--no-log-connections]");
+                        "usage: CServer [--port 47022] [--log directory] [--log-connections|--no-log-connections] [--diagnostics-port PORT --diagnostics-dir DIRECTORY [--diagnostics-days DAYS]]");
                 }
                 quitting = false;
                 Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; quitting = true; };
                 server = new CServer(new ArbiterOptions(), log, logConnections ?? ConnectionLoggingFromEnvironment());
                 server.Start(port);
+                if (!String.IsNullOrEmpty(diagPort))
+                {
+                    JoinDiagnosticsReceiver receiver = null;
+                    try
+                    {
+                        receiver = new JoinDiagnosticsReceiver(diagDir, Int32.Parse(diagDays), delegate { return DateTime.UtcNow; });
+                        receiver.Start(Int32.Parse(diagPort));
+                        server.Diagnostics = receiver;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (receiver != null) receiver.Dispose();
+                        Console.Error.WriteLine("Optional diagnostics receiver disabled: " + ex.GetType().Name);
+                    }
+                }
                 server.Run(delegate { return quitting; });
                 return 0;
             }
             catch (Exception ex) { Console.Error.WriteLine("C-server failed: " + ex.Message); return 1; }
-            finally { if (server != null) server.Stop(); }
+            finally
+            {
+                if (server != null && server.Diagnostics != null) server.Diagnostics.Dispose();
+                if (server != null) server.Stop();
+            }
         }
     }
 }

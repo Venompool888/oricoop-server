@@ -13,6 +13,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="CServer.cs" />
+    <Compile Include="JoinDiagnosticsReceiver.cs" />
+    <Compile Include="../shared/DiagnosticAddress.cs" />
+    <Compile Include="../shared/JoinDiagnosticsFields.cs" />
+    <Compile Include="../shared/JoinDiagnosticsKey.cs" />
     <Compile Include="../shared/CsWire.cs" />
     <Compile Include="../shared/Arbiter.cs" />
     <Compile Include="../shared/net/NetPeer.cs" />

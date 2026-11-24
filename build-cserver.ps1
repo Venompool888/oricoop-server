@@ -13,6 +13,10 @@ if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framewo
 if (-not (Test-Path $csc)) { throw 'csc.exe (.NET Framework 4.x) not found' }
 $sources = @(
     (Join-Path $here 'server\CServer.cs')
+    (Join-Path $here 'server\JoinDiagnosticsReceiver.cs')
+    (Join-Path $here 'shared\DiagnosticAddress.cs')
+    (Join-Path $here 'shared\JoinDiagnosticsFields.cs')
+    (Join-Path $here 'shared\JoinDiagnosticsKey.cs')
     (Join-Path $here 'shared\CsWire.cs')
     (Join-Path $here 'shared\Arbiter.cs')
     (Join-Path $here 'shared\net\NetPeer.cs')
