@@ -26,6 +26,46 @@ Not affiliated with or endorsed by Moon Studios or Microsoft. No game files here
 
 ---
 
+## Optional environment reports on join / 加入时的环境报告
+
+Players can opt in for the selected server. After a successful join, the client checks
+`https://<joined-host>/oricoop/diagnostics/v1` on TCP 443. A two-minute grant derived from
+the seat token lets the matching C-server prove it handled the join. An accepted report spends
+the grant. The seat token and grant stay out of the stored report. The client sends one report
+containing its OS version and architecture, system and game language, time zone and offset,
+game/save filesystem and free-space buckets, and the IP probe result (provider and public
+address on success, status on failure). Gameplay continues if diagnostics is unavailable.
+
+The receiver is off by default. To enable it, set `ORICOOP_DIAGNOSTICS_PORT` to a free
+loopback TCP port, and `ORICOOP_DIAGNOSTICS_DIR` to an existing absolute directory under
+the operator's control, writable by the service user. The equivalent CLI options are
+`--diagnostics-port` and `--diagnostics-dir`. Set `ORICOOP_DIAGNOSTICS_DAYS` or
+`--diagnostics-days` to keep 1–365 UTC calendar days (default 7). Reports are stored in the
+owner-only `join-reports` subdirectory, one URL-encoded record per line, with daily files
+and hourly expiry checks while the receiver runs. On startup it removes expired files before
+accepting requests. If retiring the receiver, remove its report files at the end of their
+retention period. Inform players about the fields, purpose, destination and configured retention.
+
+A TLS reverse proxy with a trusted certificate for the join hostname forwards only the report
+path to the listener in the same network namespace. Example Nginx location inside the HTTPS
+virtual host (example local port 47023):
+
+```nginx
+location = /oricoop/diagnostics/v1 {
+    client_max_body_size 2k;
+    proxy_request_buffering on;
+    proxy_cache off;
+    access_log off;
+    proxy_set_header Host 127.0.0.1:47023;
+    proxy_pass http://127.0.0.1:47023;
+}
+```
+
+Keep the storage directory outside the web root. Proxy the path to the same C-server that owns
+that hostname’s joins. The receiver authenticates GET and POST with the `X-OriCoop-Join`
+header, rejects remote peers on the backend listener, limits accepted reports to 60 per minute,
+and accepts at most 2 KiB of versioned form data per report.
+
 ## English
 
 ### What it is

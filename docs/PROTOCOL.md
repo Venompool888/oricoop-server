@@ -80,6 +80,19 @@ C-server 控制消息占 176–192（0xB0–0xC0）。字符串 = `u8 长度 + U
   token 作废；旧服务器回 CsError(code=2)，照旧保留 60 秒。
 - A reconnect restores the seat set stored for the token; the request's count/identities do not overwrite it.
 
+## Optional HTTPS diagnostics after a successful join
+
+A client with permission for the joined game address can send one v1 report to
+`https://<joined-host>/oricoop/diagnostics/v1`. The HTTPS service and the UDP game server
+share a short-lived grant for the accepted seat. Both HTTP requests carry `X-OriCoop-Join`,
+the lowercase hex HMAC-SHA256 of the ASCII string `oricoop-diagnostics-v1/request` keyed by the
+16-byte welcome token. The GET response must be HTTP 200 with the exact ASCII body
+`oricoop-diagnostics-v1.` followed by the lowercase hex HMAC for `oricoop-diagnostics-v1/capability`.
+After verifying the body, the client collects environment and probe fields and POSTs a single
+`application/x-www-form-urlencoded` body of at most 2048 bytes. Required fields are `v=1` and
+`probe=ok` or `probe=failed`. A successful probe also supplies `provider` and `ip`. On acceptance
+the server consumes the grant and returns HTTP 204. The raw welcome token stays in the game protocol.
+
 ## Arbiter rules / 裁判规则 (each one has a test)
 
 1. Seats: a join asks for n = 1-3 seats and gets the n lowest free seats 1-4 atomically, or `full` with none.

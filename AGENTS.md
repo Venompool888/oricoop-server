@@ -8,8 +8,8 @@ T-159); server-mode gameplay sync is still partly done. Server and client must c
 connection log is off by default. If enabled, it records players' IP addresses, SteamIDs and nicknames (README, Privacy).
 Tell the human to inform their players if they enable it.
 
-What it is: one .NET process, one UDP port (**default 47022**), 1-4 players per room, rooms in memory only. No
-database, no TLS, no TCP port. Protocol: C-server wire protocol v2 ([docs/PROTOCOL.md](docs/PROTOCOL.md)); v2 servers reject v1 clients. For clients from
+The game uses one .NET process and one UDP port (**default 47022**), with 1-4 players per room and rooms in memory.
+Optional environment reports require an operator-configured loopback listener and HTTPS reverse proxy on the joined host. See the README before enabling collection. Game protocol: C-server wire protocol v2 ([docs/PROTOCOL.md](docs/PROTOCOL.md)); v2 servers reject v1 clients. For clients from
 OriCoop v0.2.0-2026.11.17 deploy this repo's tag `v0.2.0-2026.11.17` instead.
 
 ---
@@ -184,7 +184,7 @@ and a public IPv4 (no CGNAT).
 | Symptom | Cause / fix |
 |---|---|
 | Client cannot connect / version error | Client and server must be the same release tag (v0.2.4-2026.11.22). Older clients have no server mode; v0.2.4 clients need a v0.2.4 server for the room list, room page and kick. |
-| Opened TCP 47022 | The server is UDP only. |
+| Opened TCP 47022 for gameplay | The game uses UDP 47022. The optional diagnostics endpoint uses HTTPS on TCP 443. |
 | Docker `COPY failed` | Build context must be the repo root: `docker build -f server/Dockerfile .` |
 | Unit fails with 203/EXEC | Wrong dotnet path in `ExecStart=`. |
 | `dotnet publish` fails: no SDK | Install `dotnet-sdk-8.0`, not just the runtime. |
