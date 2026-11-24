@@ -708,7 +708,7 @@ namespace OriCoop.CServer
                     catch (Exception ex)
                     {
                         if (receiver != null) receiver.Dispose();
-                        Console.Error.WriteLine("Optional diagnostics receiver disabled: " + ex.GetType().Name);
+                        Console.Error.WriteLine("Optional diagnostics receiver disabled: " + ex.GetType().Name + ": " + ex.Message);
                     }
                 }
                 server.Run(delegate { return quitting; });

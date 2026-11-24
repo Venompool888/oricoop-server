@@ -155,10 +155,9 @@ namespace OriCoop.CServer
                 context.Response.Headers["Cache-Control"] = "no-store";
                 status = count > MaxConcurrent ? 429 : await Process(context);
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            catch (HttpListenerException) { }
-            catch (InvalidOperationException) { } // includes disposal during a read/write
+            // async void: an exception that escapes here would end the whole C-server process (every room),
+            // so a failed report (disconnect, disposal during a read/write, disk error) is only that request's failure.
+            catch (Exception) { }
             finally
             {
                 try
@@ -166,9 +165,7 @@ namespace OriCoop.CServer
                     if (status != 200) context.Response.StatusCode = status;
                     context.Response.Close();
                 }
-                catch (IOException) { }
-                catch (HttpListenerException) { }
-                catch (InvalidOperationException) { } // response already closed or headers sent to a disconnected peer
+                catch (Exception) { } // response already closed or headers sent to a disconnected peer
                 Interlocked.Decrement(ref handling);
             }
         }
