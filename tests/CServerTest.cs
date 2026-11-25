@@ -1315,11 +1315,16 @@ namespace OriCoop.CServer
         {
             deadlineSeconds = 7200; // the quiet game launcher can be waiting for its test copy
             server = new CServer(new ArbiterOptions());
-            server.Start(0);
+            server.Start(new IPEndPoint(IPAddress.Loopback, 0));
             Client host = Join(0, "", null, 3);
             string code = host.Welcome.Code;
             File.WriteAllText(file, "127.0.0.1:" + server.LocalPort + "|" + code);
-            bool joined = Until(delegate { return SeatFourOnline(host); }, 7100000);
+            while (!SeatFourOnline(host) && clock.Elapsed.TotalSeconds < deadlineSeconds - 25)
+            {
+                Pump();
+                Thread.Sleep(20);
+            }
+            bool joined = SeatFourOnline(host);
             Check("local_game_filled_the_room", joined);
             if (!joined) return;
             File.WriteAllText(file + ".full", "full");
@@ -1351,6 +1356,13 @@ namespace OriCoop.CServer
             try
             {
                 if (args.Length == 2 && args[0] == "--game-quit") ObserveGameQuit(args[1]);
+                else if (args.Length == 1 && (args[0] == "--quit-seats" || args[0] == "--quit-seats-old-hold"))
+                {
+                    server = new CServer(new ArbiterOptions());
+                    server.TestHoldOnGameQuit = args[0] == "--quit-seats-old-hold";
+                    server.Start(new IPEndPoint(IPAddress.Loopback, 0));
+                    GameQuitTests();
+                }
                 else if (remote != null)
                 {
                     Console.WriteLine("Remote C-server " + remote);
