@@ -676,6 +676,41 @@ namespace OriCoop.CServer
             Check("leave_old_token_unknown", seat == 0 && CsWire.Decode(welcome).Result == 4);
         }
 
+        static void GameQuitTests()
+        {
+            Client host = Join(0, "", null, 2);
+            string code = host.Welcome.Code;
+            Client game = Join(1, code, null, 2);
+            // The released game sent this reason when quitting even before clients waited for the release acknowledgement.
+            game.Peer.Disconnect("partner quit the game");
+            Client next = Join(1, code, null, 2);
+            Check("game_quit_frees_both_seats_for_next_device", next.Welcome.Result == 0
+                && next.Welcome.AssignedSeat == game.Welcome.AssignedSeat && next.Welcome.Seats.Count == 2);
+
+            Client owner = Join(0, "", null, 3);
+            string other = owner.Welcome.Code;
+            int normalTimeout = server.PeerTimeoutMs;
+            Client original;
+            try { server.PeerTimeoutMs = 180; original = Join(1, other, null); }
+            finally { server.PeerTimeoutMs = normalTimeout; }
+            byte[] token = original.Welcome.Token;
+            int seat = original.Welcome.AssignedSeat;
+            clients.Remove(original); original.Dispose();   // process disappeared without a goodbye
+            RunFor(220);
+            Client waiting = Join(1, other, null);
+            Client restored = Join(2, other, token);
+            Check("unexpected_loss_reserves_the_original_seat_for_reconnect",
+                waiting.Welcome.Result == 2 && restored.Welcome.Result == 0 && restored.Welcome.AssignedSeat == seat);
+            clients.Remove(restored); // the old game has not polled its replacement notice when the player closes it
+            Client replacement = Join(2, other, token);
+            bool stillConnected = restored.Peer.State == PeerState.Connected;
+            restored.Peer.Disconnect("partner quit the game");
+            restored.Dispose();
+            Client blocked = Join(1, other, null);
+            Check("closing_replaced_connection_keeps_the_current_device",
+                stillConnected && replacement.Welcome.Result == 0 && replacement.Peer.State == PeerState.Connected && blocked.Welcome.Result == 2);
+        }
+
         static void MultiSeatLogicTests()
         {
             Arbiter room = new Arbiter("MULTI2", new ArbiterOptions { SeatHoldMs = 1000 }, 0);
@@ -1275,6 +1310,32 @@ namespace OriCoop.CServer
             }
         }
 
+        // A local game joins the fourth seat and quits through Unity. Observe the result from the surviving device.
+        static void ObserveGameQuit(string file)
+        {
+            deadlineSeconds = 7200; // the quiet game launcher can be waiting for its test copy
+            server = new CServer(new ArbiterOptions());
+            server.Start(0);
+            Client host = Join(0, "", null, 3);
+            string code = host.Welcome.Code;
+            File.WriteAllText(file, "127.0.0.1:" + server.LocalPort + "|" + code);
+            bool joined = Until(delegate { return SeatFourOnline(host); }, 7100000);
+            Check("local_game_filled_the_room", joined);
+            if (!joined) return;
+            File.WriteAllText(file + ".full", "full");
+            bool left = Until(delegate { return !SeatFourOnline(host); }, 20000);
+            Client next = Join(1, code, null);
+            Check("shutdown_sends_the_device_release_before_goodbye", server.DeviceReleaseRequests == 1);
+            Check("shutdown_releases_the_games_seat_before_the_reconnect_grace",
+                left && next.Welcome.Result == 0 && next.Welcome.AssignedSeat == 4);
+        }
+
+        static bool SeatFourOnline(Client host)
+        {
+            CsMessage roster = host.Last(CsWire.CsRoster);
+            return roster != null && roster.Roster.Exists(delegate(CsRosterEntry r) { return r.Seat == 4 && r.Online; });
+        }
+
         public static int Main(string[] args)
         {
             for (int i = 0; i + 1 < args.Length; i += 2)
@@ -1289,7 +1350,8 @@ namespace OriCoop.CServer
                 }
             try
             {
-                if (remote != null)
+                if (args.Length == 2 && args[0] == "--game-quit") ObserveGameQuit(args[1]);
+                else if (remote != null)
                 {
                     Console.WriteLine("Remote C-server " + remote);
                     deadlineSeconds = 90; wait = 3000;
@@ -1306,6 +1368,7 @@ namespace OriCoop.CServer
                     server.ListIntervalMs = 0;   // T-173: the room tests list several times a second; HostileClientTests checks the limit
                     server.Start(0);
                     EmptyRoomListTest();
+                    GameQuitTests();
                     UdpTests();
                     StaleSessionTests();
                     MultiSeatTests();
