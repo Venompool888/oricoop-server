@@ -19,14 +19,14 @@ namespace OriCoop.CServer
         {
             readonly Socket socket;
             readonly int localPort;
-            public ServerSocket(int bindPort)
+            public ServerSocket(IPEndPoint bindEndpoint)
             {
                 socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
                 try
                 {
                     socket.ReceiveBufferSize = 1024 * 1024;
                     socket.SendBufferSize = 1024 * 1024;
-                    socket.Bind(new IPEndPoint(IPAddress.Any, bindPort));
+                    socket.Bind(bindEndpoint);
                     socket.Blocking = false;
                     localPort = ((IPEndPoint)socket.LocalEndPoint).Port;
                     // Windows otherwise reports ICMP port-unreachable as a receive error (SIO_UDP_CONNRESET off).
@@ -157,6 +157,8 @@ namespace OriCoop.CServer
         }
         public int LocalPort { get { return socket.LocalPort; } }
         public long DroppedSenders { get; private set; }
+        internal long DeviceReleaseRequests { get; private set; }
+        internal bool TestHoldOnGameQuit { get; set; }
         public long DroppedStates
         {
             get
@@ -169,12 +171,17 @@ namespace OriCoop.CServer
 
         public void Start(int port)
         {
+            Start(new IPEndPoint(IPAddress.Any, port));
+        }
+
+        internal void Start(IPEndPoint bindEndpoint)
+        {
             if (logDirectory != null)
             {
                 Directory.CreateDirectory(logDirectory);
                 if (logConnections) auditPath = Path.Combine(logDirectory, ConnectionsLogName);
             }
-            socket = new ServerSocket(port); clock.Start();
+            socket = new ServerSocket(bindEndpoint); clock.Start();
             Console.WriteLine("OriCoop C-server listening on UDP port " + LocalPort);
         }
 
@@ -385,12 +392,22 @@ namespace OriCoop.CServer
 
         void Disconnected(Connection connection, string reason)
         {
+            Connection current;
+            if (!peers.TryGetValue(connection.Endpoint, out current) || current != connection) return;
             AuditEnd(connection, reason);
             peers.Remove(connection.Endpoint);
             connection.Route.Dispose();
-            if (connection.Room == null) return;
-            connection.Room.Members.Remove(connection);
-            Dispatch(connection.Room, connection.Room.Arbiter.Offline(connection.PrimarySeat, clock.Elapsed.TotalMilliseconds), true);
+            Room room = connection.Room;
+            if (room == null || !room.Members.Remove(connection)) return;
+            int primary = connection.PrimarySeat;
+            if (primary == 0) return; // already released; another device may now have the seat
+            double nowMs = clock.Elapsed.TotalMilliseconds;
+            // The game sends this goodbye only on a deliberate exit. NetPeer associates it with the
+            // current connection; a replaced connection has already been detached from the room.
+            List<Outgoing> output = reason == "partner quit the game" && !TestHoldOnGameQuit
+                ? room.Arbiter.Handle(primary, new CsMessage { Type = CsWire.CsSeatRelease, Target = 0 }, nowMs)
+                : room.Arbiter.Offline(primary, nowMs);
+            Dispatch(room, output, true);
         }
 
         string NewCode()
@@ -531,6 +548,8 @@ namespace OriCoop.CServer
                     int primary = connection.PrimarySeat;
                     List<Outgoing> output = connection.Room.Arbiter.Handle(message.Seat, message, nowMs);
                     connection.Seats = connection.Room.Arbiter.ConnectionSeats(primary);
+                    if (message.Type == CsWire.CsSeatRelease && message.Target == 0 && connection.Seats.Count == 0)
+                        DeviceReleaseRequests++;
                     if (message.Type == CsWire.CsKick)
                         foreach (Outgoing item in output)
                         {
