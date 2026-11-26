@@ -74,6 +74,15 @@ namespace OriCoop.Authority
         public event Action<int> SeatOnline;
         public event Action<int> SeatOffline;
         public event Action<int> ArbiterChanged;
+        public event Action LastDeviceInRoom;
+        public bool HasRemoteRoomMember { get { return HasRemoteDevice(online); } }
+
+        bool HasRemoteDevice(bool[] roster)
+        {
+            for (int seat = 1; seat <= 4; seat++)
+                if (roster[seat] && !seats.Contains(seat)) return true;
+            return false;
+        }
 
         void Send(byte[] message, bool reliable)
         {
@@ -127,6 +136,10 @@ namespace OriCoop.Authority
                     ArbiterSeat = 0;
                     for (int seat = 1; seat <= 4; seat++)
                         if (online[seat]) { ArbiterSeat = seat; break; }
+                    // The initial solo roster is not a departure. Capture the bound save before SeatOffline
+                    // ends the game session (and resets its slot) or changes which player is the host.
+                    if (PrimarySeat != 0 && previous[PrimarySeat] && online[PrimarySeat] && HasRemoteDevice(previous)
+                        && !HasRemoteDevice(online) && LastDeviceInRoom != null) LastDeviceInRoom();
                     for (int seat = 1; seat <= 4; seat++)
                     {
                         if (online[seat] && !previous[seat] && SeatOnline != null) SeatOnline(seat);

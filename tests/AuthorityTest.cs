@@ -306,11 +306,45 @@ namespace OriCoop.CServer
             Check("room_info_cleared_when_last_device_releases", room.Listing().Online == 0 && room.Listing().Text == "");
         }
 
+        static List<uint> ReplayedEvents(List<Outgoing> packets)
+        {
+            List<uint> events = new List<uint>();
+            foreach (Outgoing p in packets)
+                if (p.Message[0] == CsWire.CsEvent) events.Add(CsWire.Decode(p.Message).Id);
+            return events;
+        }
+
+        static void WorldHistoryOnJoin()
+        {
+            Arbiter room = new Arbiter("", new ArbiterOptions(), 0);
+            int seat; byte[] welcome;
+            var join = new CsMessage { Type = CsWire.CsJoin };
+            room.Join(join, 0, out seat, out welcome);
+            for (uint seq = 1; seq <= 5; seq++)
+                room.Handle(1, new CsMessage { Type = CsWire.CsAction, Seq = seq,
+                    Kind = seq == 2 ? (byte)1 : Arbiter.WorldBatchKind, Key = "w", Data = Data }, 0);
+            room.Handle(1, new CsMessage { Type = CsWire.CsAction, Seq = 6, Kind = Arbiter.WorldWatermarkKind,
+                Key = "w:applied", Data = BitConverter.GetBytes(4U) }, 0);
+            List<uint> fresh = ReplayedEvents(room.Join(join, 0, out seat, out welcome));
+            Check("fresh_device_replays_non_world_and_uncovered_world_events", fresh.Count == 2 && fresh[0] == 2 && fresh[1] == 5);
+            var token = CsWire.Decode(welcome).Token;
+            List<uint> mixed = ReplayedEvents(room.Join(join, 0, out seat, out welcome));
+            Check("device_with_no_receipt_keeps_history_for_later_joiners", mixed.Count == 5);
+            room.Offline(2, 0);
+            room.Handle(1, new CsMessage { Type = CsWire.CsAction, Seq = 7,
+                Kind = Arbiter.WorldBatchKind, Key = "w", Data = Data }, 0);
+            room.Handle(1, new CsMessage { Type = CsWire.CsAction, Seq = 8, Kind = Arbiter.WorldWatermarkKind,
+                Key = "w:applied", Data = BitConverter.GetBytes(6U) }, 0);
+            var resume = new CsMessage { Type = CsWire.CsJoin, Mode = 2, Token = token };
+            List<uint> missed = ReplayedEvents(room.Join(resume, 0, out seat, out welcome));
+            Check("returning_device_replays_its_missed_world_event", missed.Count == 1 && missed[0] == 6);
+        }
+
         public static int Main()
         {
             try
             {
-                UnannouncedGuest(); EventsAndClaims(); LeasesAndStates(); RejoinAndReset(); ClientProtocol(); OfflineAndSeatIdentity(); RoomInfoClearsWhenEmpty();
+                UnannouncedGuest(); EventsAndClaims(); LeasesAndStates(); RejoinAndReset(); ClientProtocol(); OfflineAndSeatIdentity(); RoomInfoClearsWhenEmpty(); WorldHistoryOnJoin();
             }
             catch (Exception e) { Check("unexpected exception: " + e, false); }
             Console.WriteLine("RESULT " + (passed == total ? "PASS " : "FAIL ") + passed + "/" + total);
