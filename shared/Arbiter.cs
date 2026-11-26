@@ -31,10 +31,10 @@ namespace OriCoop.Authority
             public ulong Steam;
             public string Nick;
             public double OfflineAt;
-            public uint LastEvent;
+            public uint LastEvent, WorldWatermark;
             public readonly HashSet<uint> Seen = new HashSet<uint>();
             public uint MaxSeq;
-            public void NewSession() { Seen.Clear(); MaxSeq = 0; }
+            public void NewSession() { Seen.Clear(); MaxSeq = 0; WorldWatermark = 0; }
 
             // Bounded dedup: remembers the last SeqWindow sequence numbers; anything older counts as already seen.
             public bool FirstTime(uint seq)
@@ -54,6 +54,7 @@ namespace OriCoop.Authority
         static readonly RandomNumberGenerator Random = new RNGCryptoServiceProvider();
         public const uint SeqWindow = 4096;
         public const byte FlagClaim = 1, FlagRelease = 2;
+        public const byte WorldBatchKind = 0x57, WorldWatermarkKind = 0x58;
 
         sealed class LeaseInfo
         {
@@ -164,14 +165,28 @@ namespace OriCoop.Authority
             Add(output, 0, message, nowMs);
         }
 
-        void Snapshot(List<Outgoing> output, int seat, uint after, double nowMs)
+        // Any existing device may become snapshot host if the current host leaves before transfer.
+        // Skip only history all those devices have actually applied. Mixed/older clients report zero.
+        uint SharedWorldWatermark(int joining)
+        {
+            uint watermark = uint.MaxValue;
+            for (int s = 1; s <= 4; s++)
+                if (seats[s] != null && seats[s].Online && seats[s].Token != seats[joining].Token &&
+                    s == PrimarySeat(ConnectionSeats(s)))
+                    watermark = Math.Min(watermark, seats[s].WorldWatermark);
+            return watermark == uint.MaxValue ? 0 : watermark;
+        }
+
+        void Snapshot(List<Outgoing> output, int seat, uint after, bool fresh, double nowMs)
         {
             CsMessage snapshot = new CsMessage { Type = CsWire.CsSnapshot };
             foreach (KeyValuePair<string, LeaseInfo> pair in leases)
                 snapshot.Leases.Add(new CsLeaseEntry { Key = pair.Key, Owner = pair.Value.Owner, Epoch = pair.Value.Epoch });
             foreach (CsStateEntry state in states.Values) snapshot.States.Add(state);
             Add(output, seat, snapshot, nowMs);
-            foreach (CsMessage e in events) if (e.Id > after) Add(output, seat, e, nowMs);
+            uint covered = fresh ? SharedWorldWatermark(seat) : 0;
+            foreach (CsMessage e in events)
+                if (e.Id > after && (e.Kind != WorldBatchKind || e.Id > covered)) Add(output, seat, e, nowMs);
         }
 
         public List<Outgoing> Tick(double nowMs)
@@ -258,7 +273,7 @@ namespace OriCoop.Authority
             welcome = CsWire.Encode(Welcome(result, owned));
             if (result == 0)
             {
-                Snapshot(output, seat, after, nowMs);
+                Snapshot(output, seat, after, request.Mode != 2, nowMs);
                 Roster(output, nowMs);
             }
             return output;
@@ -315,7 +330,8 @@ namespace OriCoop.Authority
         {
             List<Outgoing> output = new List<Outgoing>();
             SeatInfo info = seats[seat];
-            if (info == null)
+            bool fresh = info == null;
+            if (fresh)
             {
                 byte[] token = new byte[16];
                 lock (Random) Random.GetBytes(token);
@@ -324,7 +340,7 @@ namespace OriCoop.Authority
             }
             info.Online = true;
             info.NewSession();
-            Snapshot(output, seat, info.LastEvent, nowMs);
+            Snapshot(output, seat, info.LastEvent, fresh, nowMs);
             Roster(output, nowMs);
             return output;
         }
@@ -447,6 +463,15 @@ namespace OriCoop.Authority
             else if (request.Type == CsWire.CsAction)
             {
                 if (!seats[seat].FirstTime(request.Seq)) return output;
+                if (request.Kind == WorldWatermarkKind && request.Key == "w:applied")
+                {
+                    if (request.Data != null && request.Data.Length == 4)
+                    {
+                        uint through = BitConverter.ToUInt32(request.Data, 0);
+                        if (through <= lastEvent) seats[seat].WorldWatermark = Math.Max(seats[seat].WorldWatermark, through);
+                    }
+                    return output; // receipt, not a gameplay event
+                }
                 if ((request.Flags & FlagRelease) != 0)
                 {
                     // Release: only the winner (or anyone once the winner's seat is gone) frees the key; broadcast as an event.

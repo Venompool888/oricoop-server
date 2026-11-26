@@ -35,6 +35,10 @@ namespace OriCoop.Net
         private const ushort Magic = 0x4F43;
         private const int Mtu = 1200, DataHeader = 19, FragmentSize = 1000;
         private const int MaxMessage = 4 * 1024 * 1024, Window = 256;
+        // Includes fragment slot arrays and received payloads. Leave room for several complete save transfers
+        // behind a lost fragment, but never acknowledge an unbounded backlog for a single connection.
+        private const int MaxAssemblyBytes = 4 * MaxMessage;
+        private int assemblyBytes;
         private const byte Request = 1, Accept = 2, Reject = 3, Data = 4, Goodbye = 5;
         private const byte Unreliable = 0, Reliable = 1;
         private const int HistorySize = 8192, PacketWindow = 32;
@@ -150,6 +154,7 @@ namespace OriCoop.Net
         private void ClearSession()
         {
             unreliable.Clear(); waiting.Clear(); inFlight.Clear(); packetWindow.Clear(); assemblies.Clear(); incoming.Clear();
+            assemblyBytes = 0;
             delayed.Clear(); sendTraffic.Clear(); recvTraffic.Clear();
             Array.Clear(sent, 0, sent.Length); Array.Clear(history, 0, history.Length);
             historyPosition = historyCount = sendBytes = recvBytes = 0;
@@ -188,6 +193,7 @@ namespace OriCoop.Net
             if (state == PeerState.Disconnected || state == PeerState.Idle) return;
             state = PeerState.Disconnected; disconnectReason = reason;
             unreliable.Clear(); waiting.Clear(); inFlight.Clear(); packetWindow.Clear(); assemblies.Clear();
+            assemblyBytes = 0;
             stats.ReliablePending = 0;
             events.Enqueue(new PeerEvent { Reason = reason });
         }
@@ -489,10 +495,16 @@ namespace OriCoop.Net
             Assembly assembly;
             if (!assemblies.TryGetValue(m.Id, out assembly))
             {
+                int overhead = 128 + m.Count * IntPtr.Size;
+                if (assemblyBytes > MaxAssemblyBytes - overhead) { Disconnect("receive backlog limit"); return; }
+                assemblyBytes += overhead;
                 assembly = new Assembly { Pieces = new byte[m.Count][] }; assemblies.Add(m.Id, assembly);
             }
             if (assembly.Pieces[m.Index] == null)
             {
+                int storage = 32 + m.Bytes.Length;
+                if (assemblyBytes > MaxAssemblyBytes - storage) { Disconnect("receive backlog limit"); return; }
+                assemblyBytes += storage;
                 assembly.Pieces[m.Index] = m.Bytes; assembly.Count++; assembly.Length += m.Bytes.Length;
             }
             while (assemblies.TryGetValue(expectedMessage, out assembly) && assembly.Count == assembly.Pieces.Length)
@@ -500,6 +512,7 @@ namespace OriCoop.Net
                 byte[] complete = new byte[assembly.Length]; int offset = 0;
                 foreach (byte[] piece in assembly.Pieces) { Buffer.BlockCopy(piece, 0, complete, offset, piece.Length); offset += piece.Length; }
                 incoming.Enqueue(new AppMessage { Bytes = complete, Reliable = true });
+                assemblyBytes -= 128 + assembly.Count * (IntPtr.Size + 32) + assembly.Length;
                 assemblies.Remove(expectedMessage); expectedMessage++;
             }
         }
@@ -595,7 +608,11 @@ namespace OriCoop.Net
                 for (int i = 0; i < 32; i++) if ((bits & (1U << i)) != 0) Acknowledge(unchecked((ushort)(ack - 1 - i)));
                 bool fresh = ReceiveSequence(sequence);
                 if (messages.Count != 0) { ackDirty = true; receivedSinceAck++; }
-                if (fresh) foreach (WireMessage m in messages) Deliver(m);
+                if (fresh) foreach (WireMessage m in messages)
+                {
+                    Deliver(m);
+                    if (state != PeerState.Connected) return;
+                }
                 // Capture ack history during bursts before its 32-bit window rolls over.
                 if (receivedSinceAck >= 8) SendAck();
             }
